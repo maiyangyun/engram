@@ -143,6 +143,10 @@ export function createMemoryAddTool(deps: ToolDeps) {
       agentId: Type.Optional(Type.String({ description: "Agent ID namespace" })),
       orgId: Type.Optional(Type.String({ description: "Organization ID" })),
       projectId: Type.Optional(Type.String({ description: "Project ID" })),
+      visibility: Type.Optional(Type.Union([
+        Type.Literal("agent"),
+        Type.Literal("shared"),
+      ], { description: "Visibility: agent (default, only this agent) or shared (visible to all agents)" })),
       metadata: Type.Optional(Type.Object({}, { additionalProperties: true, description: "Additional metadata" })),
     }),
     async execute(_id: string, params: Record<string, unknown>) {
@@ -152,6 +156,10 @@ export function createMemoryAddTool(deps: ToolDeps) {
       if (texts.length === 0) return textResult("No facts provided.");
 
       const ctx = resolveContext(deps.config, params as { agentId?: string; orgId?: string; projectId?: string });
+      // If visibility=shared, clear agent_id so all agents can see it
+      if (params.visibility === "shared") {
+        ctx.agent_id = null;
+      }
       const memoryType = (params.memory_type as MemoryType) ?? "semantic";
       const metadata = params.metadata as Record<string, unknown> | undefined;
 

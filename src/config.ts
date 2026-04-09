@@ -2,6 +2,9 @@
 
 import type { MemoryType } from "./store.js";
 
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+
 export interface EngramConfig {
   userId: string;
   defaultOrgId: string | null;
@@ -15,6 +18,7 @@ export interface EngramConfig {
   searchThreshold: number;
   topK: number;
   customInstructions: string | null;
+  sharedKeywords: string[];
 }
 
 export function parseConfig(raw: Record<string, unknown>): EngramConfig {
@@ -38,6 +42,7 @@ export function parseConfig(raw: Record<string, unknown>): EngramConfig {
     searchThreshold: typeof raw.searchThreshold === "number" ? raw.searchThreshold : 0.5,
     topK: typeof raw.topK === "number" ? raw.topK : 10,
     customInstructions: (raw.customInstructions as string) || null,
+    sharedKeywords: loadSharedKeywords((raw.dbPath as string) || "~/.engram/engram.db"),
   };
 }
 
@@ -49,3 +54,17 @@ export function resolveDbPath(dbPath: string): string {
 }
 
 export const VALID_MEMORY_TYPES: readonly MemoryType[] = ["semantic", "episodic", "procedural"] as const;
+
+function loadSharedKeywords(dbPath: string): string[] {
+  try {
+    const resolvedDb = dbPath.startsWith("~") ? dbPath.replace(/^~/, process.env.HOME || "/tmp") : dbPath;
+    const dir = dirname(resolvedDb);
+    const rulesPath = join(dir, "shared-rules.json");
+    const raw = readFileSync(rulesPath, "utf-8");
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed.sharedKeywords)) return parsed.sharedKeywords;
+  } catch {
+    // File not found or invalid — no shared keywords
+  }
+  return [];
+}

@@ -65,6 +65,12 @@ function truncateMessages(
   return result;
 }
 
+function shouldBeShared(content: string, config: EngramConfig): boolean {
+  if (config.sharedKeywords.length === 0) return false;
+  const lower = content.toLowerCase();
+  return config.sharedKeywords.some((kw) => lower.includes(kw.toLowerCase()));
+}
+
 function resolveSessionContext(
   config: EngramConfig,
   sessionId?: string,
@@ -85,7 +91,7 @@ function resolveSessionContext(
 
 // --- autoRecall ---
 
-const RECALL_TIMEOUT_MS = 8000;
+const RECALL_TIMEOUT_MS = 15000;
 
 export function registerAutoRecall(deps: HookDeps): void {
   deps.api.on("before_prompt_build", async (event, ctx) => {
@@ -246,18 +252,20 @@ export function registerAutoCapture(deps: HookDeps): void {
     }
 
     const userContent = parsed.filter((m) => m.role === "user").map((m) => m.content).join(" ");
-    deps.api.logger.info(`engram: [capture-debug] userContent length=${userContent.length}`);
-    if (userContent.length < 10) {
-      deps.api.logger.info(`engram: [capture-debug] SKIP: userContent too short (${userContent.length})`);
+    const assistantContent = parsed.filter((m) => m.role === "assistant").map((m) => m.content).join(" ");
+    const totalContent = userContent + " " + assistantContent;
+    deps.api.logger.info(`engram: [capture-debug] userContent length=${userContent.length}, assistantContent length=${assistantContent.length}`);
+    if (totalContent.trim().length < 10) {
+      deps.api.logger.info(`engram: [capture-debug] SKIP: totalContent too short (${totalContent.trim().length})`);
       return;
     }
 
     const sessionCtx = resolveSessionContext(deps.config, sessionId);
-    deps.api.logger.info(`engram: [capture-debug] PROCEEDING — agent=${sessionCtx.agent_id} path=${userContent.length < 200 ? "fast" : "full"}`);
+    deps.api.logger.info(`engram: [capture-debug] PROCEEDING — agent=${sessionCtx.agent_id} path=${totalContent.length < 200 ? "fast" : "full"}`);
 
-    // Fast path: short/medium conversations — store user message directly as episodic memory
+    // Fast path: short/medium conversations — store user+assistant exchange directly as episodic memory
     // without LLM extraction (saves ~5-30s Ollama round-trip)
-    if (userContent.length < 200) {
+    if (totalContent.length < 500) {
       fastCapture(deps, parsed, sessionCtx).catch((err) => {
         deps.api.logger.warn(`engram: fast-capture failed: ${String(err)}`);
       });
@@ -290,18 +298,21 @@ async function fastCapture(
   const content = summary.length > 300 ? summary.slice(0, 297) + "..." : summary;
   const embedding = await deps.embedder.embed(content);
 
+  // If content matches shared keywords, write as shared (agent_id=null)
+  const effectiveAgentId = shouldBeShared(content, deps.config) ? null : ctx.agent_id;
+
   deps.store.add({
     user_id: deps.config.userId,
-    agent_id: ctx.agent_id,
+    agent_id: effectiveAgentId,
     org_id: ctx.org_id,
     project_id: ctx.project_id,
     memory_type: "episodic",
     content,
     embedding,
-    metadata: { importance: 0.5, source: "fast_capture" },
+    metadata: { importance: 0.5, source: "fast_capture", visibility: effectiveAgentId === null ? "shared" : "agent" },
   });
 
-  deps.api.logger.info(`engram: fast-captured 1 episodic memory (short conversation)`);
+  deps.api.logger.info(`engram: fast-captured 1 episodic memory (${effectiveAgentId === null ? "shared" : "agent"})`);
 }
 
 async function extractAndStore(
@@ -329,15 +340,18 @@ async function extractAndStore(
 
   for (let i = 0; i < worthKeeping.length; i++) {
     const fact = worthKeeping[i];
+    // If content matches shared keywords, write as shared (agent_id=null)
+    const effectiveAgentId = shouldBeShared(fact.content, deps.config) ? null : ctx.agent_id;
+
     deps.store.add({
       user_id: deps.config.userId,
-      agent_id: ctx.agent_id,
+      agent_id: effectiveAgentId,
       org_id: ctx.org_id,
       project_id: ctx.project_id,
       memory_type: fact.memory_type,
       content: fact.content,
       embedding: embeddings[i],
-      metadata: { importance: fact.importance, source: "auto_capture" },
+      metadata: { importance: fact.importance, source_role: fact.source, source: "auto_capture", visibility: effectiveAgentId === null ? "shared" : "agent" },
     });
   }
 
