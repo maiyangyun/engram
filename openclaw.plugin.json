@@ -1,0 +1,94 @@
+{
+  "id": "engram",
+  "name": "Engram Memory",
+  "description": "Enterprise-grade multi-agent collaborative memory system with five-dimensional ownership, memory type classification, and intelligent auto-capture/recall pipelines",
+  "kind": "memory",
+  "contracts": {
+    "tools": [
+      "memory_search",
+      "memory_add",
+      "memory_get",
+      "memory_list",
+      "memory_update",
+      "memory_delete"
+    ]
+  },
+  "uiHints": {
+    "userId": {
+      "label": "User ID",
+      "placeholder": "default",
+      "help": "Root user ID for scoping memories"
+    },
+    "defaultOrgId": {
+      "label": "Default Organization ID",
+      "placeholder": "home",
+      "help": "Default org_id for memory operations when not explicitly specified"
+    },
+    "defaultProjectId": {
+      "label": "Default Project ID",
+      "placeholder": "bonbon",
+      "help": "Default project_id for memory operations when not explicitly specified"
+    },
+    "autoCapture": {
+      "label": "Auto-Capture",
+      "help": "Automatically extract and store memories from conversations after each agent turn"
+    },
+    "autoRecall": {
+      "label": "Auto-Recall",
+      "help": "Automatically inject relevant memories into agent context before each turn"
+    },
+    "extractionModel": {
+      "label": "Extraction Model",
+      "placeholder": "ollama/qwen3:8b",
+      "help": "LLM model for memory extraction in auto-capture pipeline. Format: provider/model",
+      "advanced": true
+    },
+    "embeddingModel": {
+      "label": "Embedding Model",
+      "placeholder": "ollama/nomic-embed-text",
+      "help": "Embedding model for vector search. Format: provider/model",
+      "advanced": true
+    },
+    "ollamaBaseUrl": {
+      "label": "Ollama Base URL",
+      "placeholder": "http://localhost:11434",
+      "help": "Base URL for Ollama API (used for both extraction and embedding when using Ollama models)",
+      "advanced": true
+    },
+    "dbPath": {
+      "label": "Database Path",
+      "placeholder": "~/.engram/engram.db",
+      "help": "Path to SQLite database file",
+      "advanced": true
+    },
+    "searchThreshold": {
+      "label": "Search Threshold",
+      "placeholder": "0.5",
+      "help": "Minimum similarity score for search results (0-1). Default: 0.5"
+    },
+    "topK": {
+      "label": "Top K Results",
+      "placeholder": "10",
+      "help": "Maximum number of memories to retrieve per search"
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "userId": { "type": "string" },
+      "defaultOrgId": { "type": "string" },
+      "defaultProjectId": { "type": "string" },
+      "autoCapture": { "type": "boolean" },
+      "autoRecall": { "type": "boolean" },
+      "extractionModel": { "type": "string" },
+      "embeddingModel": { "type": "string" },
+      "ollamaBaseUrl": { "type": "string" },
+      "dbPath": { "type": "string" },
+      "searchThreshold": { "type": "number" },
+      "topK": { "type": "number" },
+      "customInstructions": { "type": "string" }
+    },
+    "required": []
+  }
+}
