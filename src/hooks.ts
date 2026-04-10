@@ -87,18 +87,29 @@ function inferSharedFromKeywords(
   config: EngramConfig,
 ): { org_id: string | null; project_id: string | null } | null {
   const lower = content.toLowerCase();
-  // Match against known projects first (more specific)
-  for (const proj of config.knownProjects) {
-    if (lower.includes(proj.toLowerCase())) {
-      // Find matching org by convention: check if any org name is a prefix/substring
-      const matchedOrg = config.knownOrgs.find(org => lower.includes(org.toLowerCase()));
-      return { org_id: matchedOrg ?? null, project_id: proj };
+  // Match against v2 structured projects (with aliases)
+  for (const proj of config.dimensionProjects) {
+    const allNames = [proj.id, ...proj.aliases];
+    if (allNames.some(name => lower.includes(name.toLowerCase()))) {
+      // Auto-resolve org from project→org mapping
+      const orgId = proj.org ?? config.projectOrgMap[proj.id] ?? null;
+      return { org_id: orgId, project_id: proj.id };
     }
   }
-  // Match against known orgs
-  for (const org of config.knownOrgs) {
-    if (org !== config.defaultOrgId && lower.includes(org.toLowerCase())) {
-      return { org_id: org, project_id: null };
+  // Fallback: match flat project strings (v1 compat)
+  if (config.dimensionProjects.length === 0) {
+    for (const proj of config.knownProjects) {
+      if (lower.includes(proj.toLowerCase())) {
+        const orgId = config.projectOrgMap[proj] ?? null;
+        return { org_id: orgId, project_id: proj };
+      }
+    }
+  }
+  // Match against orgs
+  for (const org of config.dimensionOrgs) {
+    const allNames = [org.id, ...org.aliases];
+    if (org.id !== config.defaultOrgId && allNames.some(name => lower.includes(name.toLowerCase()))) {
+      return { org_id: org.id, project_id: null };
     }
   }
   return null;
@@ -475,9 +486,13 @@ async function extractAndStore(
     ...messages,
   ];
 
-  // Pass known orgs/projects from config for LLM dimension inference
+  // Pass known orgs/projects + agent memberships for LLM dimension inference
   const knownOrgs = deps.config.knownOrgs.length > 0 ? deps.config.knownOrgs : undefined;
   const knownProjects = deps.config.knownProjects.length > 0 ? deps.config.knownProjects : undefined;
+
+  // Resolve agent memberships for the current agent
+  const agentName = ctx.agent_id?.toLowerCase();
+  const agentConfig = agentName ? deps.config.agents[agentName] : undefined;
 
   let extraction;
   try {
@@ -485,6 +500,9 @@ async function extractAndStore(
       customInstructions: deps.config.customInstructions ?? undefined,
       knownOrgs,
       knownProjects,
+      agentId: ctx.agent_id ?? undefined,
+      agentMemberships: agentConfig?.memberships,
+      projectOrgMap: Object.keys(deps.config.projectOrgMap).length > 0 ? deps.config.projectOrgMap : undefined,
     });
   } catch (err) {
     // T7: LLM extraction failed — fallback to fast-path instead of losing everything
@@ -517,8 +535,12 @@ async function extractAndStore(
     const fact = worthKeeping[i];
 
     // LLM-inferred dimensions, fall back to session context
-    const effectiveOrgId = fact.org_id ?? ctx.org_id;
+    let effectiveOrgId = fact.org_id ?? ctx.org_id;
     const effectiveProjectId = fact.project_id ?? ctx.project_id;
+    // Auto-fill org from project→org mapping if LLM set project but not org
+    if (effectiveProjectId && !effectiveOrgId && deps.config.projectOrgMap[effectiveProjectId]) {
+      effectiveOrgId = deps.config.projectOrgMap[effectiveProjectId];
+    }
     // If LLM assigned org or project, this is likely shared knowledge — clear agent_id
     const effectiveAgentId = (fact.org_id || fact.project_id) ? null : ctx.agent_id;
 

@@ -102,6 +102,9 @@ export interface ExtractionOptions {
   customInstructions?: string;
   knownOrgs?: string[];
   knownProjects?: string[];
+  agentId?: string;
+  agentMemberships?: Array<{ org: string; projects: string[]; leads?: string[] }>;
+  projectOrgMap?: Record<string, string>;
 }
 
 export async function extractMemories(
@@ -122,6 +125,18 @@ export async function extractMemories(
   }
   if (opts.knownProjects && opts.knownProjects.length > 0) {
     contextParts.push(`Known projects: ${opts.knownProjects.join(", ")}`);
+  }
+  if (opts.agentId && opts.agentMemberships && opts.agentMemberships.length > 0) {
+    const membershipDesc = opts.agentMemberships.map((m) => {
+      const parts = [`org: ${m.org}`, `projects: ${m.projects.join(", ")}`];
+      if (m.leads && m.leads.length > 0) parts.push(`leads: ${m.leads.join(", ")}`);
+      return `  - ${parts.join(", ")}`;
+    }).join("\n");
+    contextParts.push(`Current agent: ${opts.agentId}\nAgent memberships:\n${membershipDesc}\nConstrain org_id/project_id to this agent's memberships when the content clearly relates to their work. If content is about a project, automatically set org_id to that project's parent org.`);
+  }
+  if (opts.projectOrgMap && Object.keys(opts.projectOrgMap).length > 0) {
+    const mappings = Object.entries(opts.projectOrgMap).map(([p, o]) => `${p} → ${o}`).join(", ");
+    contextParts.push(`Project-to-org mapping: ${mappings}. When you assign a project_id, automatically set org_id to its parent org.`);
   }
   if (contextParts.length > 0) {
     systemPrompt += `\n\nAvailable dimensions:\n${contextParts.join("\n")}\nOnly use these exact identifiers for org_id/project_id. Use null for anything that doesn't clearly match.`;
