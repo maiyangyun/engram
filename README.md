@@ -1,3 +1,5 @@
+[English](README.md) | [繁體中文](README.zh-TW.md)
+
 # Engram 🧠
 
 **Give your AI agents memory. Real memory.**
@@ -134,26 +136,22 @@ Some knowledge should be visible to everyone. Two ways to share:
 memory_add(text="Project deadline is March 15", visibility="shared")
 ```
 
-**Automatic:** Configure keywords in `~/.engram/shared-rules.json`:
-```json
-{
-  "sharedKeywords": ["bonbon", "engram", "project-x"]
-}
-```
+**Automatic:** Engram's LLM extraction automatically infers org/project dimensions from conversation context. Configure known dimensions in `~/.engram/dimensions.json` to guide inference (see [Dimension Configuration](#dimension-configuration)).
 
-Any auto-captured memory containing these keywords is automatically promoted to shared visibility. Think of it as: **keywords = auto-promotion rules** that decide whether a memory stays in one agent's notebook or goes on the team bulletin board.
+### Four-Dimensional Ownership
 
-### Five-Layer Visibility
+Every memory carries four parallel ownership dimensions:
 
-Memories merge from broad to specific:
+| Dimension | What It Represents | Example |
+|-----------|-------------------|---------|
+| `user_id` | The human identity — personal info shared across all agents | `"soren"` |
+| `agent_id` | The agent that created/owns the memory | `"main"`, `null` (shared) |
+| `org_id` | Organization scope | `"pumpkin-global"` |
+| `project_id` | Project scope | `"engram"`, `"bonbon"` |
 
-| Layer | Scope | Who Sees It |
-|-------|-------|-------------|
-| 1 | Shared (`agent_id=null`) | All agents |
-| 2 | Agent-specific | Only that agent |
-| 3 | + Organization | Org-scoped agents |
-| 4 | + Project | Project-scoped agents |
-| 5 | + Run | Single conversation only |
+These dimensions are **parallel, not hierarchical**. A search matches memories where all specified dimensions align — unspecified dimensions are treated as wildcards. This replaces the old five-layer visibility stack with a simpler, more flexible model.
+
+For example, searching with `orgId="pumpkin-global"` returns all memories in that org regardless of project. Adding `projectId="engram"` narrows it further. Agent-private memories (`agent_id` set) are only visible to that agent; shared memories (`agent_id=null`) are visible to everyone.
 
 ---
 
@@ -163,7 +161,7 @@ Engram registers six tools, compatible with the OpenClaw memory interface:
 
 | Tool | Description |
 |------|-------------|
-| `memory_search` | Vector search with five-dimensional filtering and visibility merge |
+| `memory_search` | Vector search with four-dimensional filtering and visibility merge |
 | `memory_add` | Store memories with type classification and visibility control |
 | `memory_get` | Retrieve a specific memory by ID |
 | `memory_list` | List memories with optional filters |
@@ -198,19 +196,27 @@ Engram registers six tools, compatible with the OpenClaw memory interface:
 | `autoCapture` | `true` | Auto-extract memories from conversations |
 | `autoRecall` | `true` | Auto-inject memories into context |
 | `embeddingModel` | `ollama/nomic-embed-text` | Embedding model |
-| `extractionModel` | `ollama/qwen3:8b` | LLM for fact extraction |
+| `extractionModel` | `ollama/qwen3.5:9b` | LLM for fact extraction |
 | `ollamaBaseUrl` | `http://localhost:11434` | Ollama API endpoint |
 | `dbPath` | `~/.engram/engram.db` | SQLite database path |
 | `searchThreshold` | `0.5` | Minimum similarity score (0-1) |
 | `topK` | `10` | Max memories per search |
 
-### Shared Rules (~/.engram/shared-rules.json)
+### Dimension Configuration (~/.engram/dimensions.json)
 
 ```json
 {
-  "sharedKeywords": ["project-name", "team-term", "product-name"]
+  "knownOrgs": [
+    { "id": "pumpkin-global", "aliases": ["pumpkin", "PGL"] }
+  ],
+  "knownProjects": [
+    { "id": "engram", "aliases": ["memory system"] },
+    { "id": "bonbon", "aliases": ["dating app"] }
+  ]
 }
 ```
+
+The LLM uses these known dimensions to automatically infer `org_id` and `project_id` during memory extraction. No manual tagging needed — just configure your orgs and projects once, and Engram figures out where each memory belongs.
 
 ---
 
@@ -218,7 +224,7 @@ Engram registers six tools, compatible with the OpenClaw memory interface:
 
 - **Storage:** SQLite with WAL mode (crash-safe, concurrent reads)
 - **Embeddings:** Ollama + nomic-embed-text (768-dim, local)
-- **Extraction:** Ollama + qwen3:8b (local LLM, no cloud calls)
+- **Extraction:** Ollama + qwen3.5:9b (local LLM, no cloud calls)
 - **Runtime:** Node.js, TypeScript, tsup
 - **Framework:** OpenClaw plugin SDK
 
@@ -241,6 +247,32 @@ Engram is one of three products under the **Cortex** umbrella — tools for maki
 ---
 
 ## Changelog
+
+### v0.3 (2026-04-11)
+
+**New Features:**
+- **Four-dimensional ownership** — memories now carry `user_id`, `agent_id`, `org_id`, `project_id` with parallel dimension matching (replaces the old five-layer visibility hierarchy)
+- **Automatic dimension inference** — LLM extracts org/project dimensions from conversation context using configurable known dimensions (`dimensions.json`)
+- **Memory deduplication** — cosine similarity threshold (0.92) detects near-duplicate memories and updates existing ones instead of inserting duplicates. `memory_add` returns `dedupAction: "added" | "updated"`
+- **Context pressure capture** — proactively triggers full memory extraction when conversation grows long (30+ messages or 80K+ characters), preventing data loss from context overflow
+
+**Resilience (crash/failure protection):**
+- **Failed turn salvage** — `success=false` turns no longer skip capture; a fast-path salvage preserves the last 6 messages
+- **LLM failure fallback** — if extraction or embedding fails (timeout/abort), automatically degrades to fast-path capture instead of losing data
+- **Emergency signal capture** — SIGTERM/SIGUSR1/SIGUSR2 triggers synchronous SQLite write of pending capture data (no embedding, but content is preserved)
+- **Capture queue serialization** — all captures run through a serial queue with independent 60s timeouts, isolated from main conversation abort signals
+
+**Improvements:**
+- Extraction model upgraded to `qwen3.5:9b` (better multilingual support)
+- Extraction prompt rewritten with language-following rule at highest priority (Chinese conversations produce Chinese memories)
+- Search threshold respects config value (default 0.5) instead of hardcoded 0.6 floor — fixes poor Chinese recall
+- Fast-path captures include lightweight keyword matching for shared detection (`inferSharedFromKeywords`)
+- Parallel dimension search via single SQL query (replaces sequential five-layer scan)
+
+**Breaking Changes:**
+- `shared-rules.json` keyword-based sharing replaced by `dimensions.json` with `knownOrgs`/`knownProjects` — LLM handles dimension assignment automatically
+- `searchWithVisibility()` API changed: flat dimension filter instead of layer-based hierarchy
+- `store.add()` now returns `AddMemoryResult` with `dedupAction` field
 
 ### v0.2 (2026-04-10)
 
@@ -266,9 +298,9 @@ Engram is one of three products under the **Cortex** umbrella — tools for maki
 
 ## Roadmap
 
-- [ ] Project-scoped sharing (shared within a project, not globally)
-- [ ] Memory deduplication
-- [ ] Multilingual extraction (currently defaults to English output)
+- [x] Project-scoped sharing (shared within a project, not globally) ✅
+- [x] Memory deduplication ✅
+- [x] Multilingual extraction ✅
 - [ ] Embedding cache for faster recall under concurrency
 - [ ] Memory importance decay over time
 - [ ] Web dashboard for memory inspection
