@@ -2,7 +2,7 @@
 // Drop-in replacement for openclaw-mem0 tool interface
 
 import { Type, type Static } from "@sinclair/typebox";
-import type { EngramStore, MemoryType, SearchResult, MemoryRecord } from "./store.js";
+import type { EngramStore, MemoryType, SearchResult, MemoryRecord, AddMemoryResult } from "./store.js";
 import type { EmbeddingProvider } from "./embedding.js";
 import type { EngramConfig } from "./config.js";
 import { VALID_MEMORY_TYPES } from "./config.js";
@@ -183,13 +183,20 @@ export function createMemoryAddTool(deps: ToolDeps) {
         );
 
         deps.logger.info(`engram: stored ${results.length} memories (type: ${memoryType}, agent: ${ctx.agent_id ?? "shared"})`);
+
+        const added = results.filter(r => r.dedupAction === "added").length;
+        const updated = results.filter(r => r.dedupAction === "updated").length;
+        const dedupInfo = updated > 0 ? ` (${added} added, ${updated} updated)` : "";
+
         return jsonResult({
           results: results.map((r) => ({
             id: r.id,
             memory: r.content,
             memory_type: r.memory_type,
-            event: "ADD",
+            event: r.dedupAction === "updated" ? "UPDATE" : "ADD",
+            dedupAction: r.dedupAction,
           })),
+          summary: `${results.length} memories processed${dedupInfo}`,
         });
       } catch (err) {
         return textResult(`Memory add failed: ${String(err)}`);

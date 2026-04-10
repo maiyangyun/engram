@@ -39,7 +39,8 @@ const engramConfigSchema = {
       searchThreshold: { type: "number", description: "Minimum similarity score for search results (0-1)" },
       topK: { type: "number", description: "Maximum number of memories to retrieve per search" },
       customInstructions: { type: "string", description: "Custom instructions for memory extraction LLM" },
-      sharedKeywords: { type: "array", items: { type: "string" }, description: "Keywords that trigger shared visibility (agent_id=null) for auto-captured memories" },
+      knownOrgs: { type: "array", items: { type: "string" }, description: "Known organization identifiers for LLM dimension inference" },
+      knownProjects: { type: "array", items: { type: "string" }, description: "Known project identifiers for LLM dimension inference" },
     },
   },
   uiHints: {
@@ -48,14 +49,15 @@ const engramConfigSchema = {
     "defaultProjectId": { label: "Default Project ID", placeholder: "bonbon" },
     "autoCapture": { label: "Auto-Capture" },
     "autoRecall": { label: "Auto-Recall" },
-    "extractionModel": { label: "Extraction Model", placeholder: "ollama/qwen3:8b" },
+    "extractionModel": { label: "Extraction Model", placeholder: "ollama/qwen3.5:9b" },
     "embeddingModel": { label: "Embedding Model", placeholder: "ollama/nomic-embed-text" },
     "ollamaBaseUrl": { label: "Ollama Base URL", placeholder: "http://localhost:11434" },
     "dbPath": { label: "Database Path", placeholder: "~/.engram/engram.db" },
     "searchThreshold": { label: "Search Threshold", placeholder: "0.5" },
     "topK": { label: "Top K Results", placeholder: "10" },
     "customInstructions": { label: "Custom Instructions" },
-    "sharedKeywords": { label: "Shared Keywords", help: "Keywords that auto-promote memories to shared visibility" },
+    "knownOrgs": { label: "Known Organizations", help: "Organization IDs the LLM can assign to memories" },
+    "knownProjects": { label: "Known Projects", help: "Project IDs the LLM can assign to memories" },
   },
 };
 

@@ -64,6 +64,12 @@ export interface ListOptions {
   offset?: number;
 }
 
+export interface AddMemoryResult extends MemoryRecord {
+  dedupAction: "added" | "updated";
+}
+
+const DEDUP_THRESHOLD = 0.92;
+
 export class EngramStore {
   private db: Database.Database;
 
@@ -102,7 +108,24 @@ export class EngramStore {
     `);
   }
 
-  add(input: AddMemoryInput): MemoryRecord {
+  add(input: AddMemoryInput): AddMemoryResult {
+    // Dedup check: if embedding provided, look for similar memories in the same dimensional scope
+    if (input.embedding) {
+      const similar = this.findSimilar(input.embedding, DEDUP_THRESHOLD, {
+        user_id: input.user_id,
+        agent_id: input.agent_id ?? null,
+        org_id: input.org_id ?? null,
+        project_id: input.project_id ?? null,
+      });
+
+      if (similar.length > 0) {
+        const existing = similar[0];
+        this.update(existing.id, input.content, input.embedding);
+        const updated = this.get(existing.id)!;
+        return { ...updated, dedupAction: "updated" };
+      }
+    }
+
     const id = crypto.randomUUID();
     const now = new Date().toISOString();
     const embeddingBlob = input.embedding
@@ -139,6 +162,7 @@ export class EngramStore {
       metadata: input.metadata ?? null,
       created_at: now,
       updated_at: now,
+      dedupAction: "added",
     };
   }
 
@@ -172,38 +196,51 @@ export class EngramStore {
   }
 
   /**
-   * Five-layer visibility search with vector similarity.
-   * Merges results from all visible layers, deduplicates, and ranks by score.
+   * Parallel dimension matching search with vector similarity.
+   * A memory is visible if: user matches AND each dimension is NULL (shared) or matches the searcher's value.
    */
   searchWithVisibility(ctx: VisibilityContext, queryEmbedding: number[], memoryType?: MemoryType, topK = 10, threshold = 0.0): SearchResult[] {
-    // Build the five visibility layers
-    const layers = this.buildVisibilityLayers(ctx);
-    const allResults: SearchResult[] = [];
+    const queryEmb = new Float32Array(queryEmbedding);
 
-    for (const layer of layers) {
-      const results = this.vectorSearch({
-        ...layer,
-        user_id: ctx.user_id,
-        memory_type: memoryType,
-        embedding: queryEmbedding,
-        top_k: topK * 2, // fetch more per layer, then merge
-        threshold,
-      });
-      allResults.push(...results);
+    // Single query with parallel dimension matching
+    const conditions: string[] = [
+      "user_id = ?",
+      "embedding IS NOT NULL",
+      "(agent_id IS NULL OR agent_id = ?)",
+      "(org_id IS NULL OR org_id = ?)",
+      "(project_id IS NULL OR project_id = ?)",
+    ];
+    const params: unknown[] = [
+      ctx.user_id,
+      ctx.agent_id,
+      ctx.org_id ?? null,
+      ctx.project_id ?? null,
+    ];
+
+    if (memoryType) {
+      conditions.push("memory_type = ?");
+      params.push(memoryType);
     }
 
-    // Deduplicate by id, keep highest score
-    const seen = new Map<string, SearchResult>();
-    for (const r of allResults) {
-      const existing = seen.get(r.id);
-      if (!existing || r.score > existing.score) {
-        seen.set(r.id, r);
+    const sql = `SELECT * FROM memories WHERE ${conditions.join(" AND ")}`;
+    const rows = this.db.prepare(sql).all(...params) as RawRow[];
+
+    // Compute cosine similarity, filter, sort, take top_k
+    const scored: SearchResult[] = [];
+    for (const row of rows) {
+      if (!row.embedding) continue;
+      const rowEmbedding = new Float32Array(
+        (row.embedding as Buffer).buffer,
+        (row.embedding as Buffer).byteOffset,
+        (row.embedding as Buffer).byteLength / 4,
+      );
+      const score = cosineSimilarity(queryEmb, rowEmbedding);
+      if (score >= threshold) {
+        scored.push({ ...this.rowToRecord(row), score });
       }
     }
 
-    return Array.from(seen.values())
-      .sort((a, b) => b.score - a.score)
-      .slice(0, topK);
+    return scored.sort((a, b) => b.score - a.score).slice(0, topK);
   }
 
   /**
@@ -291,32 +328,45 @@ export class EngramStore {
     this.db.close();
   }
 
-  // --- Private helpers ---
+  findSimilar(
+    embedding: number[],
+    threshold: number,
+    filters: {
+      user_id: string;
+      agent_id?: string | null;
+      org_id?: string | null;
+      project_id?: string | null;
+    },
+  ): SearchResult[] {
+    const queryEmbedding = new Float32Array(embedding);
 
-  private buildVisibilityLayers(ctx: VisibilityContext): Array<{ agent_id?: string | null; org_id?: string | null; project_id?: string | null }> {
-    const layers: Array<{ agent_id?: string | null; org_id?: string | null; project_id?: string | null }> = [];
+    const { sql, params } = this.buildFilterQuery({
+      user_id: filters.user_id,
+      agent_id: filters.agent_id,
+      org_id: filters.org_id,
+      project_id: filters.project_id,
+      embedding,
+    });
+    const rows = this.db.prepare(sql).all(...params) as RawRow[];
 
-    // Layer 1: Agent's project-private memory (agent=X, org=O, project=P)
-    if (ctx.org_id && ctx.project_id) {
-      layers.push({ agent_id: ctx.agent_id, org_id: ctx.org_id, project_id: ctx.project_id });
+    const scored: SearchResult[] = [];
+    for (const row of rows) {
+      if (!row.embedding) continue;
+      const rowEmbedding = new Float32Array(
+        (row.embedding as Buffer).buffer,
+        (row.embedding as Buffer).byteOffset,
+        (row.embedding as Buffer).byteLength / 4,
+      );
+      const score = cosineSimilarity(queryEmbedding, rowEmbedding);
+      if (score >= threshold) {
+        scored.push({ ...this.rowToRecord(row), score });
+      }
     }
-    // Layer 2: Project shared memory (agent=NULL, org=O, project=P)
-    if (ctx.org_id && ctx.project_id) {
-      layers.push({ agent_id: null, org_id: ctx.org_id, project_id: ctx.project_id });
-    }
-    // Layer 3: Agent's org-level memory (agent=X, org=O, project=NULL)
-    if (ctx.org_id) {
-      layers.push({ agent_id: ctx.agent_id, org_id: ctx.org_id, project_id: null });
-    }
-    // Layer 4: Org shared memory (agent=NULL, org=O, project=NULL)
-    if (ctx.org_id) {
-      layers.push({ agent_id: null, org_id: ctx.org_id, project_id: null });
-    }
-    // Layer 5: Agent's pure personal memory (agent=X, org=NULL, project=NULL)
-    layers.push({ agent_id: ctx.agent_id, org_id: null, project_id: null });
 
-    return layers;
+    return scored.sort((a, b) => b.score - a.score);
   }
+
+  // --- Private helpers ---
 
   private buildFilterQuery(opts: SearchOptions): { sql: string; params: unknown[] } {
     const conditions: string[] = ["user_id = ?", "embedding IS NOT NULL"];

@@ -5,7 +5,9 @@ export interface ExtractionResult {
     content: string;
     memory_type: "semantic" | "episodic" | "procedural";
     importance: number; // 0-1
-    source: "user" | "assistant" | "both"; // who said/decided this
+    source: "user" | "assistant" | "both";
+    org_id: string | null;
+    project_id: string | null;
   }>;
 }
 
@@ -24,7 +26,7 @@ export class OllamaLLMProvider implements LLMProvider {
 
   async chat(messages: Array<{ role: string; content: string }>): Promise<string> {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 120_000); // 120s timeout for long extractions
+    const timeoutId = setTimeout(() => controller.abort(), 120_000);
 
     try {
       const resp = await fetch(`${this.baseUrl}/api/chat`, {
@@ -52,49 +54,83 @@ export class OllamaLLMProvider implements LLMProvider {
   }
 }
 
-const EXTRACTION_SYSTEM_PROMPT = `You are a memory extraction engine. Your job is to extract durable, reusable facts from conversations between a User and an AI Assistant.
+const EXTRACTION_SYSTEM_PROMPT = `You are a memory extraction engine for a multi-agent collaborative system. Extract durable, reusable facts from conversations.
 
-You MUST extract facts from BOTH sides of the conversation:
-- What the User said (facts, preferences, requests, context they shared)
-- What the Assistant said (decisions made, analysis conclusions, commitments, recommendations given, plans proposed)
+## LANGUAGE RULE (MANDATORY)
+Output each fact in the SAME language as the source content. Chinese conversation → Chinese facts. English → English. NEVER translate. This is critical for downstream vector search quality.
 
-For each fact, classify it into one of three types:
-- "semantic": Stable facts, rules, knowledge, preferences (e.g., "User prefers PostgreSQL", "Project uses React 19")
-- "episodic": Events, incidents, time-bound occurrences (e.g., "Deployed v2.1 on 2026-04-09", "Database crashed due to connection pool overflow")
-- "procedural": Processes, workflows, decisions, plans, how-to knowledge (e.g., "Always run migration check before deploying", "Decided to prioritize P0 before P1 in v0.2")
+## What to extract
+Extract from BOTH User and Assistant messages:
+- User: facts, preferences, requests, decisions, context
+- Assistant: analysis conclusions, recommendations, commitments, architecture decisions, plans
 
-Source attribution — mark WHO said/decided each fact:
-- "source": "user" — facts stated or provided by the User
-- "source": "assistant" — decisions, analysis, recommendations, or commitments made by the Assistant
-- "source": "both" — facts co-established through discussion (e.g., agreed-upon plans)
+## Classification
+- "semantic": Stable facts, knowledge, preferences, rules
+- "episodic": Time-bound events, incidents, milestones
+- "procedural": Processes, workflows, decisions, how-to knowledge
 
-Rate importance from 0.0 to 1.0:
-- 1.0: Critical decisions, architecture choices, recurring issues
+## Source attribution
+- "user": stated by User
+- "assistant": decided/analyzed by Assistant
+- "both": co-established through discussion
+
+## Dimensional ownership (IMPORTANT)
+For each fact, infer which organization and project it belongs to:
+- "org_id": the team/organization this fact is relevant to. Use null if not organization-specific or uncertain.
+- "project_id": the specific project this fact belongs to. Use null if not project-specific or uncertain.
+
+Assign dimensions based on the CONTENT of the fact, not just keyword presence. A fact about team processes belongs to that team's org. A fact about a specific product belongs to that product's project. Personal preferences or general knowledge should have null for both.
+
+## Importance (0.0-1.0)
+- 1.0: Critical decisions, architecture choices
 - 0.7: Useful preferences, project context
-- 0.4: Minor details, one-off observations
-- 0.1: Trivial, likely not needed again
+- 0.4: Minor details
+- Below 0.4: Skip — not worth storing
 
-Rules:
-- Extract facts from BOTH User and Assistant messages — do NOT ignore Assistant contributions
-- Be concise — each fact should be one clear sentence
-- Include dates/times for episodic memories when available
-- Skip greetings, acknowledgments, and filler
-- Skip information that is too vague or context-dependent to be useful standalone
-- If nothing worth remembering, return an empty array
+## Rules
+- Be concise — one clear sentence per fact
+- Include dates when available for episodic memories
+- Skip greetings, filler, acknowledgments
+- Skip vague or context-dependent information
+- If nothing worth remembering, return empty array
+- When uncertain about org_id/project_id, use null — do NOT guess
 
-Respond with ONLY valid JSON in this exact format:
-{"facts": [{"content": "...", "memory_type": "semantic|episodic|procedural", "importance": 0.0-1.0, "source": "user|assistant|both"}]}`;
+## Output format (STRICT JSON, no markdown)
+{"facts": [{"content": "...", "memory_type": "semantic|episodic|procedural", "importance": 0.0-1.0, "source": "user|assistant|both", "org_id": "string|null", "project_id": "string|null"}]}`;
+
+export interface ExtractionOptions {
+  customInstructions?: string;
+  knownOrgs?: string[];
+  knownProjects?: string[];
+}
 
 export async function extractMemories(
   llm: LLMProvider,
   messages: Array<{ role: string; content: string }>,
-  customInstructions?: string,
+  customInstructionsOrOpts?: string | ExtractionOptions,
 ): Promise<ExtractionResult> {
-  const systemPrompt = customInstructions
-    ? `${EXTRACTION_SYSTEM_PROMPT}\n\nAdditional instructions:\n${customInstructions}`
-    : EXTRACTION_SYSTEM_PROMPT;
+  const opts: ExtractionOptions = typeof customInstructionsOrOpts === "string"
+    ? { customInstructions: customInstructionsOrOpts }
+    : customInstructionsOrOpts ?? {};
 
-  // Format conversation for extraction
+  let systemPrompt = EXTRACTION_SYSTEM_PROMPT;
+
+  // Inject known orgs/projects so LLM can map to correct identifiers
+  const contextParts: string[] = [];
+  if (opts.knownOrgs && opts.knownOrgs.length > 0) {
+    contextParts.push(`Known organizations: ${opts.knownOrgs.join(", ")}`);
+  }
+  if (opts.knownProjects && opts.knownProjects.length > 0) {
+    contextParts.push(`Known projects: ${opts.knownProjects.join(", ")}`);
+  }
+  if (contextParts.length > 0) {
+    systemPrompt += `\n\nAvailable dimensions:\n${contextParts.join("\n")}\nOnly use these exact identifiers for org_id/project_id. Use null for anything that doesn't clearly match.`;
+  }
+
+  if (opts.customInstructions) {
+    systemPrompt += `\n\nAdditional instructions:\n${opts.customInstructions}`;
+  }
+
   const conversationText = messages
     .map((m) => `[${m.role}]: ${m.content}`)
     .join("\n\n");
@@ -109,7 +145,6 @@ export async function extractMemories(
 
 function parseExtractionResponse(response: string): ExtractionResult {
   try {
-    // Try to extract JSON from the response (handle markdown code blocks)
     const jsonMatch = response.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, response];
     const jsonStr = (jsonMatch[1] ?? response).trim();
     const parsed = JSON.parse(jsonStr);
@@ -133,6 +168,8 @@ function parseExtractionResponse(response: string): ExtractionResult {
           memory_type: f.memory_type as "semantic" | "episodic" | "procedural",
           importance: typeof f.importance === "number" ? Math.max(0, Math.min(1, f.importance)) : 0.5,
           source: validSources.has(f.source as string) ? (f.source as "user" | "assistant" | "both") : "user",
+          org_id: typeof f.org_id === "string" && f.org_id !== "null" ? f.org_id : null,
+          project_id: typeof f.project_id === "string" && f.project_id !== "null" ? f.project_id : null,
         })),
     };
   } catch {

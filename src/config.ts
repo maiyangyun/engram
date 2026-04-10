@@ -1,7 +1,6 @@
 // Engram Configuration
 
 import type { MemoryType } from "./store.js";
-
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -18,7 +17,8 @@ export interface EngramConfig {
   searchThreshold: number;
   topK: number;
   customInstructions: string | null;
-  sharedKeywords: string[];
+  knownOrgs: string[];
+  knownProjects: string[];
 }
 
 export function parseConfig(raw: Record<string, unknown>): EngramConfig {
@@ -29,20 +29,24 @@ export function parseConfig(raw: Record<string, unknown>): EngramConfig {
     return fallback;
   };
 
+  const dbPath = (raw.dbPath as string) || "~/.engram/engram.db";
+  const dims = loadDimensions(dbPath);
+
   return {
     userId: (raw.userId as string) || "default",
     defaultOrgId: (raw.defaultOrgId as string) || null,
     defaultProjectId: (raw.defaultProjectId as string) || null,
     autoCapture: raw.autoCapture !== false,
     autoRecall: raw.autoRecall !== false,
-    extractionModel: parseModelRef(raw.extractionModel, { provider: "ollama", model: "qwen3:8b" }),
+    extractionModel: parseModelRef(raw.extractionModel, { provider: "ollama", model: "qwen3.5:9b" }),
     embeddingModel: parseModelRef(raw.embeddingModel, { provider: "ollama", model: "nomic-embed-text" }),
     ollamaBaseUrl: (raw.ollamaBaseUrl as string) || "http://localhost:11434",
-    dbPath: (raw.dbPath as string) || "~/.engram/engram.db",
+    dbPath,
     searchThreshold: typeof raw.searchThreshold === "number" ? raw.searchThreshold : 0.5,
     topK: typeof raw.topK === "number" ? raw.topK : 10,
     customInstructions: (raw.customInstructions as string) || null,
-    sharedKeywords: loadSharedKeywords((raw.dbPath as string) || "~/.engram/engram.db"),
+    knownOrgs: Array.isArray(raw.knownOrgs) ? raw.knownOrgs as string[] : dims.knownOrgs,
+    knownProjects: Array.isArray(raw.knownProjects) ? raw.knownProjects as string[] : dims.knownProjects,
   };
 }
 
@@ -55,16 +59,18 @@ export function resolveDbPath(dbPath: string): string {
 
 export const VALID_MEMORY_TYPES: readonly MemoryType[] = ["semantic", "episodic", "procedural"] as const;
 
-function loadSharedKeywords(dbPath: string): string[] {
+function loadDimensions(dbPath: string): { knownOrgs: string[]; knownProjects: string[] } {
   try {
     const resolvedDb = dbPath.startsWith("~") ? dbPath.replace(/^~/, process.env.HOME || "/tmp") : dbPath;
     const dir = dirname(resolvedDb);
-    const rulesPath = join(dir, "shared-rules.json");
-    const raw = readFileSync(rulesPath, "utf-8");
+    const dimsPath = join(dir, "dimensions.json");
+    const raw = readFileSync(dimsPath, "utf-8");
     const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed.sharedKeywords)) return parsed.sharedKeywords;
+    return {
+      knownOrgs: Array.isArray(parsed.knownOrgs) ? parsed.knownOrgs : [],
+      knownProjects: Array.isArray(parsed.knownProjects) ? parsed.knownProjects : [],
+    };
   } catch {
-    // File not found or invalid — no shared keywords
+    return { knownOrgs: [], knownProjects: [] };
   }
-  return [];
 }

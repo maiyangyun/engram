@@ -21,7 +21,7 @@ interface HookDeps {
 
 // --- Helpers ---
 
-function isNonInteractiveTrigger(trigger?: string, sessionId?: string): boolean {
+function isNonInteractiveTrigger(trigger?: string, _sessionId?: string): boolean {
   if (!trigger) return false;
   const nonInteractive = ["heartbeat", "cron", "system", "startup"];
   return nonInteractive.some((t) => trigger.toLowerCase().includes(t));
@@ -55,7 +55,6 @@ function truncateMessages(
 ): Array<{ role: string; content: string }> {
   let totalChars = 0;
   const result: Array<{ role: string; content: string }> = [];
-  // Walk from end (most recent) to start
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
     if (totalChars + msg.content.length > maxChars && result.length > 0) break;
@@ -65,17 +64,10 @@ function truncateMessages(
   return result;
 }
 
-function shouldBeShared(content: string, config: EngramConfig): boolean {
-  if (config.sharedKeywords.length === 0) return false;
-  const lower = content.toLowerCase();
-  return config.sharedKeywords.some((kw) => lower.includes(kw.toLowerCase()));
-}
-
 function resolveSessionContext(
   config: EngramConfig,
   sessionId?: string,
 ): { agent_id: string | null; org_id: string | null; project_id: string | null } {
-  // Extract agent_id from session key pattern: "agent:<agentId>:..."
   let agentId: string | null = null;
   if (sessionId) {
     const match = sessionId.match(/^agent:([^:]+)/);
@@ -87,6 +79,121 @@ function resolveSessionContext(
     org_id: config.defaultOrgId,
     project_id: config.defaultProjectId,
   };
+}
+
+/** T5: Lightweight keyword match for fast-path shared detection (no LLM needed) */
+function inferSharedFromKeywords(
+  content: string,
+  config: EngramConfig,
+): { org_id: string | null; project_id: string | null } | null {
+  const lower = content.toLowerCase();
+  // Match against known projects first (more specific)
+  for (const proj of config.knownProjects) {
+    if (lower.includes(proj.toLowerCase())) {
+      // Find matching org by convention: check if any org name is a prefix/substring
+      const matchedOrg = config.knownOrgs.find(org => lower.includes(org.toLowerCase()));
+      return { org_id: matchedOrg ?? null, project_id: proj };
+    }
+  }
+  // Match against known orgs
+  for (const org of config.knownOrgs) {
+    if (org !== config.defaultOrgId && lower.includes(org.toLowerCase())) {
+      return { org_id: org, project_id: null };
+    }
+  }
+  return null;
+}
+
+// --- Emergency capture state (T8) ---
+
+interface PendingCapture {
+  messages: Array<{ role: string; content: string }>;
+  ctx: { agent_id: string | null; org_id: string | null; project_id: string | null };
+  timestamp: number;
+}
+
+let pendingCapture: PendingCapture | null = null;
+let emergencyHandlerRegistered = false;
+
+// --- T9: Context pressure tracking ---
+
+interface SessionPressure {
+  msgCount: number;
+  totalChars: number;
+  lastFullCaptureAt: number; // msgCount at last full extraction
+}
+
+const sessionPressure = new Map<string, SessionPressure>();
+
+// Thresholds: trigger proactive full capture when context is likely getting large
+const PRESSURE_MSG_THRESHOLD = 30;       // messages since last full capture
+const PRESSURE_CHAR_THRESHOLD = 80_000;  // chars accumulated
+const PRESSURE_CAPTURE_INTERVAL = 15;    // min messages between proactive captures
+
+function clearPending(): void {
+  pendingCapture = null;
+}
+
+function registerEmergencyHandler(deps: HookDeps): void {
+  if (emergencyHandlerRegistered) return;
+  emergencyHandlerRegistered = true;
+
+  const emergencyFlush = (signal: string) => {
+    if (!pendingCapture) return;
+    try {
+      const { messages, ctx } = pendingCapture;
+      const summary = messages
+        .slice(-6)
+        .map((m) => `${m.role === "user" ? "U" : "A"}: ${m.content.slice(0, 150)}`)
+        .join(" | ");
+      const content = summary.length > 300 ? summary.slice(0, 297) + "..." : summary;
+
+      // Sync write — no embedding (better-sqlite3 is synchronous)
+      deps.store.add({
+        user_id: deps.config.userId,
+        agent_id: ctx.agent_id,
+        org_id: ctx.org_id,
+        project_id: ctx.project_id,
+        memory_type: "episodic",
+        content: `[emergency-${signal}] ${content}`,
+        metadata: { importance: 0.7, source: "emergency_capture", signal },
+      });
+      deps.api.logger.info(`engram: emergency capture on ${signal} — saved 1 memory (no embedding)`);
+      pendingCapture = null;
+    } catch (err) {
+      // Last resort — can't do much here
+      try { deps.api.logger.warn(`engram: emergency capture failed: ${String(err)}`); } catch { /* noop */ }
+    }
+  };
+
+  process.on("SIGTERM", () => emergencyFlush("SIGTERM"));
+  process.on("SIGUSR1", () => emergencyFlush("SIGUSR1"));
+  // SIGUSR2 is used by OpenClaw for reload
+  process.on("SIGUSR2", () => emergencyFlush("SIGUSR2"));
+}
+
+// --- T10: Capture queue (serialize, isolate from main dialog abort) ---
+
+const CAPTURE_TIMEOUT_MS = 60_000; // independent timeout for capture ops
+
+let captureQueue: Promise<void> = Promise.resolve();
+
+function enqueueCapture(label: string, fn: () => Promise<void>, logger: HookApi["logger"]): void {
+  captureQueue = captureQueue.then(() => {
+    return new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        logger.warn(`engram: [queue] ${label} timed out after ${CAPTURE_TIMEOUT_MS}ms`);
+        resolve();
+      }, CAPTURE_TIMEOUT_MS);
+
+      fn()
+        .catch((err) => logger.warn(`engram: [queue] ${label} failed: ${String(err)}`))
+        .finally(() => {
+          clearTimeout(timer);
+          resolve();
+        });
+    });
+  });
 }
 
 // --- autoRecall ---
@@ -116,7 +223,6 @@ export function registerAutoRecall(deps: HookDeps): void {
       let results: SearchResult[];
 
       if (sessionCtx.agent_id) {
-        // Use five-layer visibility merge
         results = deps.store.searchWithVisibility(
           {
             user_id: deps.config.userId,
@@ -127,15 +233,14 @@ export function registerAutoRecall(deps: HookDeps): void {
           embedding,
           undefined,
           deps.config.topK,
-          Math.max(deps.config.searchThreshold, 0.6),
+          deps.config.searchThreshold,
         );
       } else {
-        // No agent context — search all user memories
         results = deps.store.vectorSearch({
           user_id: deps.config.userId,
           embedding,
           top_k: deps.config.topK,
-          threshold: Math.max(deps.config.searchThreshold, 0.6),
+          threshold: deps.config.searchThreshold,
         });
       }
 
@@ -185,15 +290,19 @@ export function registerAutoRecall(deps: HookDeps): void {
 // --- autoCapture ---
 
 export function registerAutoCapture(deps: HookDeps): void {
+  // T8: Register emergency signal handlers on first load
+  registerEmergencyHandler(deps);
+
   deps.api.on("agent_end", async (event, ctx) => {
     const messages = event.messages as Array<{ role: string; content: unknown }> | undefined;
     const trigger = ctx?.trigger as string | undefined;
     const sessionId = ctx?.sessionKey as string | undefined;
 
-    deps.api.logger.info(`engram: [capture-debug] agent_end fired — session=${sessionId ?? "none"} trigger=${trigger ?? "none"} success=${event.success} msgCount=${messages?.length ?? 0}`);
+    const success = !!event.success;
+    deps.api.logger.info(`engram: [capture-debug] agent_end fired — session=${sessionId ?? "none"} trigger=${trigger ?? "none"} success=${success} msgCount=${messages?.length ?? 0}`);
 
-    if (!event.success || !messages || messages.length === 0) {
-      deps.api.logger.info(`engram: [capture-debug] SKIP: success=${event.success} msgs=${messages?.length ?? 0}`);
+    if (!messages || messages.length === 0) {
+      deps.api.logger.info(`engram: [capture-debug] SKIP: no messages`);
       return;
     }
 
@@ -206,7 +315,6 @@ export function registerAutoCapture(deps: HookDeps): void {
       return;
     }
 
-    // Skip if agent already used memory tools this turn
     const MEMORY_TOOLS = new Set(["memory_add", "memory_update", "memory_delete"]);
     const agentUsedMemoryTool = messages.some((msg) => {
       if (msg?.role !== "assistant" || !Array.isArray(msg?.content)) return false;
@@ -219,7 +327,6 @@ export function registerAutoCapture(deps: HookDeps): void {
       return;
     }
 
-    // Extract text from messages
     const parsed: Array<{ role: string; content: string }> = [];
     for (const msg of messages) {
       const role = msg.role;
@@ -261,26 +368,64 @@ export function registerAutoCapture(deps: HookDeps): void {
     }
 
     const sessionCtx = resolveSessionContext(deps.config, sessionId);
-    deps.api.logger.info(`engram: [capture-debug] PROCEEDING — agent=${sessionCtx.agent_id} path=${totalContent.length < 200 ? "fast" : "full"}`);
 
-    // Fast path: short/medium conversations — store user+assistant exchange directly as episodic memory
-    // without LLM extraction (saves ~5-30s Ollama round-trip)
-    if (totalContent.length < 500) {
-      fastCapture(deps, parsed, sessionCtx).catch((err) => {
-        deps.api.logger.warn(`engram: fast-capture failed: ${String(err)}`);
-      });
+    // T8: Set pending capture so emergency handler can flush if process is killed
+    pendingCapture = { messages: parsed, ctx: sessionCtx, timestamp: Date.now() };
+
+    // T9: Track context pressure per session
+    const sessKey = sessionId ?? "unknown";
+    let pressure = sessionPressure.get(sessKey);
+    if (!pressure) {
+      pressure = { msgCount: 0, totalChars: 0, lastFullCaptureAt: 0 };
+      sessionPressure.set(sessKey, pressure);
+    }
+    pressure.msgCount += parsed.length;
+    pressure.totalChars += totalContent.length;
+
+    const msgSinceLastFull = pressure.msgCount - pressure.lastFullCaptureAt;
+    const underPressure = msgSinceLastFull >= PRESSURE_MSG_THRESHOLD || pressure.totalChars >= PRESSURE_CHAR_THRESHOLD;
+    const enoughInterval = msgSinceLastFull >= PRESSURE_CAPTURE_INTERVAL;
+
+    deps.api.logger.info(`engram: [capture-debug] PROCEEDING — agent=${sessionCtx.agent_id} path=${!success ? "salvage-fast" : underPressure && enoughInterval ? "pressure-full" : totalContent.length < 500 ? "fast" : "full"}`);
+
+    // Failed rounds: force fast-path salvage capture (no LLM, just save what we have)
+    if (!success) {
+      enqueueCapture("salvage", () => fastCapture(deps, parsed, sessionCtx, "salvage"), deps.api.logger);
       return;
     }
 
-    // Full path: LLM-driven extraction for substantial conversations
-    // Truncate to last 10 messages to keep Ollama extraction fast (<30s)
+    // T9: Under context pressure, force full extraction even for short content
+    if (underPressure && enoughInterval) {
+      deps.api.logger.info(`engram: [T9] context pressure detected (msgs=${pressure.msgCount}, chars=${pressure.totalChars}, sinceLastFull=${msgSinceLastFull}) — forcing full extraction`);
+      const recentWindow = parsed.slice(-10);
+      const truncated = truncateMessages(recentWindow, 3000);
+      enqueueCapture("pressure-full", async () => {
+        await extractAndStore(deps, truncated, sessionCtx);
+        const p = sessionPressure.get(sessKey);
+        if (p) {
+          p.lastFullCaptureAt = p.msgCount;
+          p.totalChars = 0;
+        }
+      }, deps.api.logger);
+      return;
+    }
+
+    if (totalContent.length < 500) {
+      enqueueCapture("fast", () => fastCapture(deps, parsed, sessionCtx, "fast"), deps.api.logger);
+      return;
+    }
+
     const recentWindow = parsed.slice(-10);
-    // Also cap total text to ~3000 chars to avoid Ollama timeout
     const truncated = truncateMessages(recentWindow, 3000);
 
-    extractAndStore(deps, truncated, sessionCtx).catch((err) => {
-      deps.api.logger.warn(`engram: capture failed: ${String(err)}`);
-    });
+    enqueueCapture("full", async () => {
+      await extractAndStore(deps, truncated, sessionCtx);
+      const p = sessionPressure.get(sessKey);
+      if (p) {
+        p.lastFullCaptureAt = p.msgCount;
+        p.totalChars = 0;
+      }
+    }, deps.api.logger);
   });
 }
 
@@ -288,9 +433,8 @@ async function fastCapture(
   deps: HookDeps,
   messages: Array<{ role: string; content: string }>,
   ctx: { agent_id: string | null; org_id: string | null; project_id: string | null },
+  mode: "fast" | "salvage" = "fast",
 ): Promise<void> {
-  // For short conversations, store the full exchange as a single episodic memory
-  // This avoids the ~5-10s Ollama LLM round-trip
   const summary = messages
     .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.content.slice(0, 200)}`)
     .join(" | ");
@@ -298,21 +442,26 @@ async function fastCapture(
   const content = summary.length > 300 ? summary.slice(0, 297) + "..." : summary;
   const embedding = await deps.embedder.embed(content);
 
-  // If content matches shared keywords, write as shared (agent_id=null)
-  const effectiveAgentId = shouldBeShared(content, deps.config) ? null : ctx.agent_id;
+  // T5: Lightweight keyword match for shared detection on fast path
+  const sharedMatch = inferSharedFromKeywords(content, deps.config);
+  const effectiveAgentId = sharedMatch ? null : ctx.agent_id;
+  const effectiveOrgId = sharedMatch?.org_id ?? ctx.org_id;
+  const effectiveProjectId = sharedMatch?.project_id ?? ctx.project_id;
 
-  deps.store.add({
+  // Fast path: no LLM inference, use session context defaults
+  const result = deps.store.add({
     user_id: deps.config.userId,
     agent_id: effectiveAgentId,
-    org_id: ctx.org_id,
-    project_id: ctx.project_id,
+    org_id: effectiveOrgId,
+    project_id: effectiveProjectId,
     memory_type: "episodic",
     content,
     embedding,
-    metadata: { importance: 0.5, source: "fast_capture", visibility: effectiveAgentId === null ? "shared" : "agent" },
+    metadata: { importance: mode === "salvage" ? 0.6 : 0.5, source: mode === "salvage" ? "salvage_capture" : "fast_capture" },
   });
 
-  deps.api.logger.info(`engram: fast-captured 1 episodic memory (${effectiveAgentId === null ? "shared" : "agent"})`);
+  deps.api.logger.info(`engram: ${mode}-captured 1 episodic memory (${result.dedupAction})`);
+  clearPending(); // T8: capture succeeded, no need for emergency flush
 }
 
 async function extractAndStore(
@@ -326,36 +475,71 @@ async function extractAndStore(
     ...messages,
   ];
 
-  const extraction = await extractMemories(deps.llm, messagesWithDate, deps.config.customInstructions ?? undefined);
+  // Pass known orgs/projects from config for LLM dimension inference
+  const knownOrgs = deps.config.knownOrgs.length > 0 ? deps.config.knownOrgs : undefined;
+  const knownProjects = deps.config.knownProjects.length > 0 ? deps.config.knownProjects : undefined;
+
+  let extraction;
+  try {
+    extraction = await extractMemories(deps.llm, messagesWithDate, {
+      customInstructions: deps.config.customInstructions ?? undefined,
+      knownOrgs,
+      knownProjects,
+    });
+  } catch (err) {
+    // T7: LLM extraction failed — fallback to fast-path instead of losing everything
+    deps.api.logger.warn(`engram: LLM extraction failed (${String(err)}), falling back to fast-path`);
+    await fastCapture(deps, messages, ctx, "salvage");
+    return;
+  }
 
   if (extraction.facts.length === 0) return;
 
-  // Filter by importance threshold
   const worthKeeping = extraction.facts.filter((f) => f.importance >= 0.4);
   if (worthKeeping.length === 0) return;
 
-  // Embed and store
-  const contents = worthKeeping.map((f) => f.content);
-  const embeddings = await deps.embedder.embedBatch(contents);
+  let contents: string[];
+  let embeddings: number[][];
+  try {
+    contents = worthKeeping.map((f) => f.content);
+    embeddings = await deps.embedder.embedBatch(contents);
+  } catch (err) {
+    // Embedding failed after successful extraction — still salvage
+    deps.api.logger.warn(`engram: embedding failed (${String(err)}), falling back to fast-path`);
+    await fastCapture(deps, messages, ctx, "salvage");
+    return;
+  }
+
+  let addedCount = 0;
+  let updatedCount = 0;
 
   for (let i = 0; i < worthKeeping.length; i++) {
     const fact = worthKeeping[i];
-    // If content matches shared keywords, write as shared (agent_id=null)
-    const effectiveAgentId = shouldBeShared(fact.content, deps.config) ? null : ctx.agent_id;
 
-    deps.store.add({
+    // LLM-inferred dimensions, fall back to session context
+    const effectiveOrgId = fact.org_id ?? ctx.org_id;
+    const effectiveProjectId = fact.project_id ?? ctx.project_id;
+    // If LLM assigned org or project, this is likely shared knowledge — clear agent_id
+    const effectiveAgentId = (fact.org_id || fact.project_id) ? null : ctx.agent_id;
+
+    const result = deps.store.add({
       user_id: deps.config.userId,
       agent_id: effectiveAgentId,
-      org_id: ctx.org_id,
-      project_id: ctx.project_id,
+      org_id: effectiveOrgId,
+      project_id: effectiveProjectId,
       memory_type: fact.memory_type,
       content: fact.content,
       embedding: embeddings[i],
-      metadata: { importance: fact.importance, source_role: fact.source, source: "auto_capture", visibility: effectiveAgentId === null ? "shared" : "agent" },
+      metadata: { importance: fact.importance, source_role: fact.source, source: "auto_capture" },
     });
+
+    if (result.dedupAction === "added") addedCount++;
+    else updatedCount++;
   }
 
+  const dedupStats = updatedCount > 0 ? ` (${addedCount} added, ${updatedCount} updated)` : "";
   deps.api.logger.info(
-    `engram: auto-captured ${worthKeeping.length} memories (${worthKeeping.map((f) => f.memory_type).join(", ")})`
+    `engram: auto-captured ${worthKeeping.length} memories (${worthKeeping.map((f) => f.memory_type).join(", ")})${dedupStats}`
   );
+  clearPending(); // T8: capture succeeded, no need for emergency flush
 }
