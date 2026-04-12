@@ -37,7 +37,7 @@ Built for [OpenClaw](https://github.com/openclaw/openclaw). Part of the [Cortex]
 - [OpenClaw](https://github.com/openclaw/openclaw) `>= 2026.3.24`
 - [Ollama](https://ollama.com) running locally:
   ```bash
-  ollama pull nomic-embed-text
+  ollama pull bge-m3
   ollama pull qwen3:8b
   ```
 
@@ -67,7 +67,7 @@ Add to your `openclaw.json`:
           "autoRecall": true,
           "autoCapture": true,
           "ollamaBaseUrl": "http://localhost:11434",
-          "embeddingModel": "ollama/nomic-embed-text",
+          "embeddingModel": "ollama/bge-m3",
           "extractionModel": "ollama/qwen3:8b"
         }
       }
@@ -125,33 +125,41 @@ This is where Engram gets interesting.
 
 ### Isolation
 
-Every memory has an `agent_id`. Agent A's memories are invisible to Agent B. This happens automatically — Engram reads the agent identity from the session key.
+Every memory has an `agent_id` — always. Agent A’s memories are invisible to Agent B by default. This happens automatically — Engram reads the agent identity from the session key.
 
-### Shared Memories
+### Visibility Model (v2)
 
-Some knowledge should be visible to everyone. Two ways to share:
+Sharing is controlled by **org/project dimensions**, not by clearing `agent_id`. Every memory always has a creator (`agent_id` is never null). Visibility expands upward through dimensions:
 
-**Manual:** Use `visibility: "shared"` when adding a memory:
+- **Has `project_id` + `org_id`** → visible to all agents that are members of that project
+- **Has `org_id` only** → visible to all agents in that organization
+- **Neither** → visible only to the creating agent
+
+Agents belong to at least one organization (default: `home`). Projects belong to organizations.
+
+**Manual sharing:** Use `visibility: "shared"` to attach the agent’s default org (making it org-wide visible):
 ```
 memory_add(text="Project deadline is March 15", visibility="shared")
 ```
 
-**Automatic:** Engram's LLM extraction automatically infers org/project dimensions from conversation context. Configure known dimensions in `~/.engram/dimensions.json` to guide inference (see [Dimension Configuration](#dimension-configuration)).
+**Automatic:** Engram’s LLM extraction automatically infers org/project dimensions from conversation context. Configure known dimensions in `~/.engram/dimensions.json` to guide inference (see [Dimension Configuration](#dimension-configuration)). New orgs/projects discovered by the LLM are auto-registered in `dimensions.json`.
+
+**Backward compatibility:** Legacy records with `agent_id=NULL` (from pre-v0.4) are still visible to all agents, preserving existing shared memories.
 
 ### Four-Dimensional Ownership
 
 Every memory carries four parallel ownership dimensions:
 
 | Dimension | What It Represents | Example |
-|-----------|-------------------|---------|
+|-----------|-------------------|--------|
 | `user_id` | The human identity — personal info shared across all agents | `"soren"` |
-| `agent_id` | The agent that created/owns the memory | `"main"`, `null` (shared) |
-| `org_id` | Organization scope | `"pumpkin-global"` |
-| `project_id` | Project scope | `"engram"`, `"bonbon"` |
+| `agent_id` | The agent that created the memory (always set, never null) | `"main"`, `"lion"` |
+| `org_id` | Organization scope — expands visibility to org members | `"pumpkin-global"` |
+| `project_id` | Project scope — expands visibility to project members | `"engram"`, `"bonbon"` |
 
-These dimensions are **parallel, not hierarchical**. A search matches memories where all specified dimensions align — unspecified dimensions are treated as wildcards. This replaces the old five-layer visibility stack with a simpler, more flexible model.
+These dimensions are **parallel, not hierarchical**. A search matches memories where all specified dimensions align — unspecified dimensions are treated as wildcards.
 
-For example, searching with `orgId="pumpkin-global"` returns all memories in that org regardless of project. Adding `projectId="engram"` narrows it further. Agent-private memories (`agent_id` set) are only visible to that agent; shared memories (`agent_id=null`) are visible to everyone.
+For example, searching with `orgId="pumpkin-global"` returns all memories in that org regardless of project. Adding `projectId="engram"` narrows it further. Memories without org/project dimensions are private to the creating agent.
 
 ---
 
@@ -173,7 +181,7 @@ Engram registers six tools, compatible with the OpenClaw memory interface:
 **`memory_add`:**
 - `text` / `facts` — what to remember
 - `memory_type` — `semantic`, `episodic`, or `procedural` (default: `semantic`)
-- `visibility` — `agent` (private, default) or `shared` (all agents)
+- `visibility` — `agent` (private, default) or `shared` (attaches default org_id, making it visible to org members)
 - `agentId`, `orgId`, `projectId` — ownership dimensions
 
 **`memory_search`:**
@@ -195,7 +203,7 @@ Engram registers six tools, compatible with the OpenClaw memory interface:
 | `defaultProjectId` | `null` | Default project |
 | `autoCapture` | `true` | Auto-extract memories from conversations |
 | `autoRecall` | `true` | Auto-inject memories into context |
-| `embeddingModel` | `ollama/nomic-embed-text` | Embedding model |
+| `embeddingModel` | `ollama/bge-m3` | Embedding model |
 | `extractionModel` | `ollama/qwen3.5:9b` | LLM for fact extraction |
 | `ollamaBaseUrl` | `http://localhost:11434` | Ollama API endpoint |
 | `dbPath` | `~/.engram/engram.db` | SQLite database path |
@@ -216,19 +224,19 @@ Engram registers six tools, compatible with the OpenClaw memory interface:
 }
 ```
 
-The LLM uses these known dimensions to automatically infer `org_id` and `project_id` during memory extraction. No manual tagging needed — just configure your orgs and projects once, and Engram figures out where each memory belongs.
+The LLM uses these known dimensions to automatically infer `org_id` and `project_id` during memory extraction. No manual tagging needed — just configure your orgs and projects once, and Engram figures out where each memory belongs. New dimensions discovered by the LLM are auto-registered here.
 
 ---
 
 ## Tech Stack
 
 - **Storage:** SQLite with WAL mode (crash-safe, concurrent reads)
-- **Embeddings:** Ollama + nomic-embed-text (768-dim, local)
-- **Extraction:** Ollama + qwen3.5:9b (local LLM, no cloud calls)
+- **Embeddings:** Ollama + bge-m3 (1024-dim, local, excellent CJK support)
+- **Extraction:** Ollama + qwen3.5:9b (local LLM) or Gemini API (cloud option)
 - **Runtime:** Node.js, TypeScript, tsup
 - **Framework:** OpenClaw plugin SDK
 
-Zero external API calls. Zero cloud cost. Your data stays yours.
+Local-first by default. Gemini API available as an optional cloud extraction provider.
 
 ---
 
@@ -247,6 +255,36 @@ Engram is one of three products under the **Cortex** umbrella — tools for maki
 ---
 
 ## Changelog
+
+### v0.4.0 (2026-04-13)
+
+**v2 Visibility Model (breaking):**
+- `agent_id` is now **always set** — every memory has an explicit creator. Sharing no longer works by setting `agent_id=null`
+- Visibility expands through `org_id`/`project_id` dimensions: project+org → project members; org only → org members; neither → agent-private
+- Agents belong to at least one organization (default: `home`); projects belong to organizations
+- Backward compatible with legacy `agent_id=NULL` records from earlier versions
+
+**New Features:**
+- **Memory decay** — `last_recalled_at` tracking with time-weighted scoring (`DECAY_RATE=0.03`, `DECAY_FLOOR=0.1`). Frequently recalled memories stay relevant; forgotten ones fade
+- **Noise filtering** — skips greetings, system mechanism chatter, and trivial replies during capture
+- **Ollama global queue** — serializes all Ollama requests through a single queue, preventing model-switching thrash
+- **Gemini API provider** — cloud-based extraction alternative to local Ollama
+- **dimensions.json auto-discovery** — new orgs/projects found by LLM extraction are automatically registered
+- **Context pressure tracking** — proactively triggers full capture under high context load
+- **Emergency capture** — SIGTERM/SIGUSR1/SIGUSR2 signals save pending memories synchronously
+- **Capture queue** — serialized with independent timeouts, isolated from main conversation abort signals
+- **Fast-path keyword dimension inference** — infers org/project from keywords without LLM calls
+- **Salvage capture** — preserves content when LLM or embedding fails
+
+**Improvements:**
+- Embedding model upgraded to `bge-m3` — significantly better Chinese search quality
+- `searchWithVisibility` rewritten for v2 visibility model
+- Extraction prompt: language preservation + agent membership injection for better dimension inference
+- Configurable search threshold (default 0.5, removed hardcoded 0.6 floor)
+
+**Breaking Changes:**
+- `agent_id` is never null in new records. Shared visibility is determined by `org_id`/`project_id` presence
+- `searchWithVisibility()` rewritten for v2 dimension-based visibility
 
 ### v0.3 (2026-04-11)
 
@@ -302,7 +340,7 @@ Engram is one of three products under the **Cortex** umbrella — tools for maki
 - [x] Memory deduplication ✅
 - [x] Multilingual extraction ✅
 - [ ] Embedding cache for faster recall under concurrency
-- [ ] Memory importance decay over time
+- [x] Memory importance decay over time ✅
 - [ ] Web dashboard for memory inspection
 
 ---
