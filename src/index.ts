@@ -5,7 +5,7 @@ import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { parseConfig, resolveDbPath } from "./config.js";
 import { EngramStore } from "./store.js";
 import { OllamaEmbeddingProvider } from "./embedding.js";
-import { OllamaLLMProvider } from "./extraction.js";
+import { OllamaLLMProvider, GeminiLLMProvider } from "./extraction.js";
 import {
   createMemorySearchTool,
   createMemoryAddTool,
@@ -25,14 +25,15 @@ const engramConfigSchema = {
   },
   jsonSchema: {
     type: "object" as const,
-    additionalProperties: false,
+    additionalProperties: true,
     properties: {
       userId: { type: "string", description: "Root user ID for scoping memories" },
       defaultOrgId: { type: "string", description: "Default org_id for memory operations when not explicitly specified" },
       defaultProjectId: { type: "string", description: "Default project_id for memory operations when not explicitly specified" },
       autoCapture: { type: "boolean", description: "Automatically extract and store memories from conversations after each agent turn" },
       autoRecall: { type: "boolean", description: "Automatically inject relevant memories into agent context before each turn" },
-      extractionModel: { type: "string", description: "LLM model for memory extraction in auto-capture pipeline. Format: provider/model" },
+      extractionModel: { type: "string", description: "LLM model for memory extraction in auto-capture pipeline. Format: provider/model (e.g. ollama/qwen3.5:9b or gemini/gemini-2.0-flash)" },
+      geminiApiKey: { type: "string", description: "Google Gemini API key. Can also be set via GEMINI_API_KEY env var or ~/.engram/gemini.key file" },
       embeddingModel: { type: "string", description: "Embedding model for vector search. Format: provider/model" },
       ollamaBaseUrl: { type: "string", description: "Base URL for Ollama API" },
       dbPath: { type: "string", description: "Path to SQLite database file" },
@@ -49,7 +50,7 @@ const engramConfigSchema = {
     "defaultProjectId": { label: "Default Project ID", placeholder: "bonbon" },
     "autoCapture": { label: "Auto-Capture" },
     "autoRecall": { label: "Auto-Recall" },
-    "extractionModel": { label: "Extraction Model", placeholder: "ollama/qwen3.5:9b" },
+    "extractionModel": { label: "Extraction Model", placeholder: "gemini/gemini-2.0-flash" },
     "embeddingModel": { label: "Embedding Model", placeholder: "ollama/nomic-embed-text" },
     "ollamaBaseUrl": { label: "Ollama Base URL", placeholder: "http://localhost:11434" },
     "dbPath": { label: "Database Path", placeholder: "~/.engram/engram.db" },
@@ -80,10 +81,15 @@ const engramPlugin = definePluginEntry({
     });
 
     // Initialize LLM provider (for extraction pipeline)
-    const llm = new OllamaLLMProvider({
-      model: cfg.extractionModel.model,
-      baseUrl: cfg.ollamaBaseUrl,
-    });
+    const llm = cfg.extractionModel.provider === "gemini"
+      ? new GeminiLLMProvider({
+          model: cfg.extractionModel.model,
+          apiKey: cfg.geminiApiKey || "",
+        })
+      : new OllamaLLMProvider({
+          model: cfg.extractionModel.model,
+          baseUrl: cfg.ollamaBaseUrl,
+        });
 
     const toolDeps = { store, embedder, config: cfg, logger: api.logger };
 

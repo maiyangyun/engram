@@ -31,7 +31,8 @@ function resolveContext(
   opts: { agentId?: string; orgId?: string; projectId?: string },
 ) {
   return {
-    agent_id: opts.agentId || null,
+    // v2: agent_id priority: explicit param > active agent from hooks > null
+    agent_id: opts.agentId || config._activeAgentId || null,
     org_id: opts.orgId || config.defaultOrgId,
     project_id: opts.projectId || config.defaultProjectId,
   };
@@ -80,7 +81,7 @@ export function createMemorySearchTool(deps: ToolDeps) {
         Type.Literal("personal"),
         Type.Literal("shared"),
         Type.Literal("all"),
-      ], { description: "Search scope: personal (agent-only), shared (agent=NULL), all (visibility merge)" })),
+      ], { description: "Search scope: personal (agent-only), shared (org/project-visible), all (visibility merge)" })),
     }),
     async execute(_id: string, params: Record<string, unknown>) {
       const query = params.query as string;
@@ -93,27 +94,50 @@ export function createMemorySearchTool(deps: ToolDeps) {
         const embedding = await deps.embedder.embed(query);
         let results: SearchResult[];
 
-        if (scope === "all" && ctx.agent_id) {
-          // Use five-layer visibility merge
+        if (scope === "all") {
+          // v0.4: Always use visibility-aware search for "all" scope.
+          // This matches autoRecall behavior: sees shared (NULL) + own dimension memories.
+          // For sessions without agent_id, pass "__none__" as sentinel to still use
+          // the (agent_id IS NULL OR agent_id = ?) logic.
           results = deps.store.searchWithVisibility(
-            { user_id: deps.config.userId, agent_id: ctx.agent_id, org_id: ctx.org_id, project_id: ctx.project_id },
+            {
+              user_id: deps.config.userId,
+              agent_id: ctx.agent_id ?? "__none__",
+              org_id: ctx.org_id,
+              project_id: ctx.project_id,
+            },
             embedding,
             memoryType,
             limit,
             deps.config.searchThreshold,
+            true, // v0.4: broadScope — search across all orgs/projects
           );
         } else {
-          // Direct search with explicit filters
-          results = deps.store.vectorSearch({
-            user_id: deps.config.userId,
-            agent_id: scope === "shared" ? null : ctx.agent_id,
-            org_id: ctx.org_id,
-            project_id: ctx.project_id,
-            memory_type: memoryType,
-            embedding,
-            top_k: limit,
-            threshold: deps.config.searchThreshold,
-          });
+          // v2: personal scope = only this agent's memories; shared scope = org/project visible
+          if (scope === "shared") {
+            // Search for memories visible via org/project membership (exclude agent-only)
+            results = deps.store.vectorSearch({
+              user_id: deps.config.userId,
+              org_id: ctx.org_id,
+              project_id: ctx.project_id,
+              memory_type: memoryType,
+              embedding,
+              top_k: limit,
+              threshold: deps.config.searchThreshold,
+            });
+          } else {
+            // personal: only this agent's own memories
+            results = deps.store.vectorSearch({
+              user_id: deps.config.userId,
+              agent_id: ctx.agent_id,
+              org_id: ctx.org_id,
+              project_id: ctx.project_id,
+              memory_type: memoryType,
+              embedding,
+              top_k: limit,
+              threshold: deps.config.searchThreshold,
+            });
+          }
         }
 
         if (results.length === 0) {
@@ -156,9 +180,10 @@ export function createMemoryAddTool(deps: ToolDeps) {
       if (texts.length === 0) return textResult("No facts provided.");
 
       const ctx = resolveContext(deps.config, params as { agentId?: string; orgId?: string; projectId?: string });
-      // If visibility=shared, clear agent_id so all agents can see it
-      if (params.visibility === "shared") {
-        ctx.agent_id = null;
+      // v2: visibility=shared no longer clears agent_id; sharing is via org_id/project_id
+      // Ensure org_id is set for shared visibility
+      if (params.visibility === "shared" && !ctx.org_id) {
+        ctx.org_id = deps.config.defaultOrgId;
       }
       const memoryType = (params.memory_type as MemoryType) ?? "semantic";
       const metadata = params.metadata as Record<string, unknown> | undefined;

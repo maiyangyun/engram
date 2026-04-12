@@ -5,6 +5,7 @@ import type { EmbeddingProvider } from "./embedding.js";
 import type { LLMProvider } from "./extraction.js";
 import { extractMemories } from "./extraction.js";
 import type { EngramConfig } from "./config.js";
+import { autoDiscoverDimensions } from "./config.js";
 
 interface HookApi {
   on(event: string, handler: (event: Record<string, unknown>, ctx?: Record<string, unknown>) => Promise<unknown>): void;
@@ -42,10 +43,39 @@ function isSystemPrompt(text: string): boolean {
   );
 }
 
+/** v0.4: Detect noise content that should never be captured as memory */
+function isNoiseContent(text: string): boolean {
+  const lower = text.toLowerCase().trim();
+
+  // OpenClaw internal machinery
+  if (lower.includes("generate a short 1-2 word filename slug")) return true;
+  if (lower.includes("generate a short filename slug")) return true;
+  if (lower.includes("conversation summary:")) return true;
+  if (lower.startsWith("heartbeat_ok")) return true;
+  if (lower.startsWith("no_reply")) return true;
+
+  // Trivial responses with no informational value
+  const trivialPatterns = /^(ok|好的?|收到|嗯|是的?|对|understood|got it|sure|yes|no|好吧|行|可以|明白|知道了|roger|ack)\.?$/i;
+  if (trivialPatterns.test(lower)) return true;
+
+  // Pure emoji or very short non-informational content
+  const stripped = lower.replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}\s]/gu, "");
+  if (stripped.length < 3) return true;
+
+  return false;
+}
+
 function stripMetadata(text: string): string {
   return text
     .replace(/Sender\s*\(untrusted metadata\):\s*```json[\s\S]*?```\s*/gi, "")
     .replace(/<relevant-memories>[\s\S]*?<\/relevant-memories>\s*/g, "")
+    // v0.4: Strip OpenClaw inbound context blocks
+    .replace(/## Inbound Context \(trusted metadata\)[\s\S]*?```\s*/gi, "")
+    .replace(/\[message_id:[^\]]*\]/g, "")
+    // v0.4: Strip timestamp prefixes from channel messages
+    .replace(/^\[\w{3}\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+GMT[+-]\d+\]\s*/gm, "")
+    // v0.4: Strip Current time metadata
+    .replace(/Current time:.*?\(Asia\/Shanghai\).*?UTC\s*/gi, "")
     .trim();
 }
 
@@ -79,6 +109,35 @@ function resolveSessionContext(
     org_id: config.defaultOrgId,
     project_id: config.defaultProjectId,
   };
+}
+
+/**
+ * v0.4: Resolve agent's full membership (all orgs/projects they belong to).
+ * Used by autoRecall to determine cross-org visibility.
+ */
+function resolveAgentMembership(
+  config: EngramConfig,
+  agentId: string | null,
+): { memberOrgs: string[]; memberProjects: string[] } {
+  const orgs = new Set<string>();
+  const projects = new Set<string>();
+
+  // Always include default org/project
+  if (config.defaultOrgId) orgs.add(config.defaultOrgId);
+  if (config.defaultProjectId) projects.add(config.defaultProjectId);
+
+  // Add agent-specific memberships from dimensions.json
+  if (agentId) {
+    const agentConfig = config.agents[agentId.toLowerCase()];
+    if (agentConfig) {
+      for (const m of agentConfig.memberships) {
+        orgs.add(m.org);
+        for (const p of m.projects) projects.add(p);
+      }
+    }
+  }
+
+  return { memberOrgs: [...orgs], memberProjects: [...projects] };
 }
 
 /** T5: Lightweight keyword match for fast-path shared detection (no LLM needed) */
@@ -185,7 +244,7 @@ function registerEmergencyHandler(deps: HookDeps): void {
 
 // --- T10: Capture queue (serialize, isolate from main dialog abort) ---
 
-const CAPTURE_TIMEOUT_MS = 60_000; // independent timeout for capture ops
+const CAPTURE_TIMEOUT_MS = 300_000; // v0.4: aligned with extraction LLM timeout (300s for local qwen3.5)
 
 let captureQueue: Promise<void> = Promise.resolve();
 
@@ -225,8 +284,15 @@ export function registerAutoRecall(deps: HookDeps): void {
     const isSubagent = isSubagentSession(sessionId);
     const cleanPrompt = stripMetadata(prompt);
     if (cleanPrompt.length < 5) return;
+    // v0.4: Skip recall for noise content
+    if (isNoiseContent(cleanPrompt)) return;
 
     const sessionCtx = resolveSessionContext(deps.config, sessionId);
+
+    // v2: Set active agent context for tools to read as fallback
+    if (sessionCtx.agent_id) {
+      deps.config._activeAgentId = sessionCtx.agent_id;
+    }
 
     const recallWork = async (): Promise<{ prependContext: string } | undefined> => {
       const embedding = await deps.embedder.embed(cleanPrompt);
@@ -234,12 +300,15 @@ export function registerAutoRecall(deps: HookDeps): void {
       let results: SearchResult[];
 
       if (sessionCtx.agent_id) {
+        const membership = resolveAgentMembership(deps.config, sessionCtx.agent_id);
         results = deps.store.searchWithVisibility(
           {
             user_id: deps.config.userId,
             agent_id: sessionCtx.agent_id,
             org_id: sessionCtx.org_id,
             project_id: sessionCtx.project_id,
+            memberOrgs: membership.memberOrgs,
+            memberProjects: membership.memberProjects,
           },
           embedding,
           undefined,
@@ -268,6 +337,9 @@ export function registerAutoRecall(deps: HookDeps): void {
           return `- ${r.content}${tagStr}`;
         })
         .join("\n");
+
+      // v0.4: Touch recalled memories to reset their decay clock
+      deps.store.touchRecalled(results.map((r) => r.id));
 
       deps.api.logger.info(`engram: injecting ${results.length} memories into context`);
 
@@ -358,6 +430,9 @@ export function registerAutoCapture(deps: HookDeps): void {
       text = stripMetadata(text);
       if (!text) continue;
 
+      // v0.4: Skip noise content (system machinery, trivial replies)
+      if (isNoiseContent(text)) continue;
+
       parsed.push({ role, content: text });
     }
 
@@ -408,8 +483,8 @@ export function registerAutoCapture(deps: HookDeps): void {
     // T9: Under context pressure, force full extraction even for short content
     if (underPressure && enoughInterval) {
       deps.api.logger.info(`engram: [T9] context pressure detected (msgs=${pressure.msgCount}, chars=${pressure.totalChars}, sinceLastFull=${msgSinceLastFull}) — forcing full extraction`);
-      const recentWindow = parsed.slice(-10);
-      const truncated = truncateMessages(recentWindow, 3000);
+      const recentWindow = parsed.slice(-20);
+      const truncated = truncateMessages(recentWindow, 4000);
       enqueueCapture("pressure-full", async () => {
         await extractAndStore(deps, truncated, sessionCtx);
         const p = sessionPressure.get(sessKey);
@@ -426,8 +501,8 @@ export function registerAutoCapture(deps: HookDeps): void {
       return;
     }
 
-    const recentWindow = parsed.slice(-10);
-    const truncated = truncateMessages(recentWindow, 3000);
+    const recentWindow = parsed.slice(-20);
+    const truncated = truncateMessages(recentWindow, 4000);
 
     enqueueCapture("full", async () => {
       await extractAndStore(deps, truncated, sessionCtx);
@@ -453,16 +528,16 @@ async function fastCapture(
   const content = summary.length > 300 ? summary.slice(0, 297) + "..." : summary;
   const embedding = await deps.embedder.embed(content);
 
-  // T5: Lightweight keyword match for shared detection on fast path
+  // T5: Lightweight keyword match for dimension detection on fast path
   const sharedMatch = inferSharedFromKeywords(content, deps.config);
-  const effectiveAgentId = sharedMatch ? null : ctx.agent_id;
   const effectiveOrgId = sharedMatch?.org_id ?? ctx.org_id;
   const effectiveProjectId = sharedMatch?.project_id ?? ctx.project_id;
 
   // Fast path: no LLM inference, use session context defaults
+  // v2: agent_id always set — sharing is via org_id/project_id dimensions
   const result = deps.store.add({
     user_id: deps.config.userId,
-    agent_id: effectiveAgentId,
+    agent_id: ctx.agent_id,
     org_id: effectiveOrgId,
     project_id: effectiveProjectId,
     memory_type: "episodic",
@@ -516,6 +591,12 @@ async function extractAndStore(
   const worthKeeping = extraction.facts.filter((f) => f.importance >= 0.4);
   if (worthKeeping.length === 0) return;
 
+  // v0.4: Auto-discover new dimensions from LLM extraction results
+  const discovered = autoDiscoverDimensions(deps.config, worthKeeping);
+  if (discovered) {
+    deps.api.logger.info(`engram: [dimensions] auto-discovered new org/project dimensions from extraction`);
+  }
+
   let contents: string[];
   let embeddings: number[][];
   try {
@@ -541,12 +622,10 @@ async function extractAndStore(
     if (effectiveProjectId && !effectiveOrgId && deps.config.projectOrgMap[effectiveProjectId]) {
       effectiveOrgId = deps.config.projectOrgMap[effectiveProjectId];
     }
-    // If LLM assigned org or project, this is likely shared knowledge — clear agent_id
-    const effectiveAgentId = (fact.org_id || fact.project_id) ? null : ctx.agent_id;
-
+    // v2: agent_id always set — sharing is determined by org_id/project_id dimensions
     const result = deps.store.add({
       user_id: deps.config.userId,
-      agent_id: effectiveAgentId,
+      agent_id: ctx.agent_id,
       org_id: effectiveOrgId,
       project_id: effectiveProjectId,
       memory_type: fact.memory_type,

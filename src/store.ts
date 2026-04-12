@@ -1,5 +1,6 @@
 // Engram Storage Layer — SQLite + sqlite-vec
 // Five-dimensional ownership: user_id, agent_id, org_id, project_id, memory_type
+// v0.4: Memory decay — last_recalled_at tracking + time-weighted scoring
 
 import Database from "better-sqlite3";
 import { mkdirSync, existsSync } from "node:fs";
@@ -19,6 +20,7 @@ export interface MemoryRecord {
   metadata: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
+  last_recalled_at: string | null;
 }
 
 export interface AddMemoryInput {
@@ -48,6 +50,9 @@ export interface VisibilityContext {
   agent_id: string;
   org_id?: string | null;
   project_id?: string | null;
+  // v0.4: Agent's full membership for cross-org visibility
+  memberOrgs?: string[];     // all orgs this agent belongs to
+  memberProjects?: string[]; // all projects this agent belongs to
 }
 
 export interface SearchResult extends MemoryRecord {
@@ -68,7 +73,15 @@ export interface AddMemoryResult extends MemoryRecord {
   dedupAction: "added" | "updated";
 }
 
-const DEDUP_THRESHOLD = 0.92;
+const DEDUP_THRESHOLD = 0.88;
+
+// v0.4: Memory decay constants
+// Memories lose relevance over time unless recalled. The decay function is:
+//   decayFactor = 1 / (1 + daysSinceLastActive * DECAY_RATE)
+// where lastActive = max(last_recalled_at, updated_at, created_at)
+const DECAY_RATE = 0.03;           // Gentle decay: 50% weight at ~33 days idle
+const DECAY_FLOOR = 0.1;           // Never decay below 10% weight
+const DECAY_BLEND = 0.3;           // 30% decay influence on final score (70% pure similarity)
 
 export class EngramStore {
   private db: Database.Database;
@@ -106,6 +119,13 @@ export class EngramStore {
       CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(memory_type);
       CREATE INDEX IF NOT EXISTS idx_memories_five_dim ON memories(user_id, agent_id, org_id, project_id);
     `);
+
+    // v0.4: Add last_recalled_at column (migration-safe)
+    try {
+      this.db.exec(`ALTER TABLE memories ADD COLUMN last_recalled_at TEXT`);
+    } catch {
+      // Column already exists — expected on subsequent runs
+    }
   }
 
   add(input: AddMemoryInput): AddMemoryResult {
@@ -196,26 +216,69 @@ export class EngramStore {
   }
 
   /**
-   * Parallel dimension matching search with vector similarity.
-   * A memory is visible if: user matches AND each dimension is NULL (shared) or matches the searcher's value.
+   * v2 visibility model: A memory is visible to an agent if:
+   * 1. agent_id matches (own memories, always visible), OR
+   * 2. Memory has org_id in agent's member orgs AND (no project_id OR project_id in agent's member projects)
+   * 3. Legacy: agent_id IS NULL memories are visible if org/project matches (backward compat)
    */
-  searchWithVisibility(ctx: VisibilityContext, queryEmbedding: number[], memoryType?: MemoryType, topK = 10, threshold = 0.0): SearchResult[] {
+  searchWithVisibility(ctx: VisibilityContext, queryEmbedding: number[], memoryType?: MemoryType, topK = 10, threshold = 0.0, broadScope = false): SearchResult[] {
     const queryEmb = new Float32Array(queryEmbedding);
 
-    // Single query with parallel dimension matching
     const conditions: string[] = [
       "user_id = ?",
       "embedding IS NOT NULL",
-      "(agent_id IS NULL OR agent_id = ?)",
-      "(org_id IS NULL OR org_id = ?)",
-      "(project_id IS NULL OR project_id = ?)",
     ];
     const params: unknown[] = [
       ctx.user_id,
-      ctx.agent_id,
-      ctx.org_id ?? null,
-      ctx.project_id ?? null,
     ];
+
+    // v2: broadScope skips org/project filtering (for manual search "all" scope)
+    if (!broadScope) {
+      const orgList = ctx.memberOrgs && ctx.memberOrgs.length > 0
+        ? ctx.memberOrgs
+        : ctx.org_id ? [ctx.org_id] : [];
+      const projList = ctx.memberProjects && ctx.memberProjects.length > 0
+        ? ctx.memberProjects
+        : ctx.project_id ? [ctx.project_id] : [];
+
+      // v2 visibility: own memories OR org/project-shared memories
+      const visibilityParts: string[] = [];
+
+      // 1. Own memories (agent_id matches)
+      visibilityParts.push("agent_id = ?");
+      params.push(ctx.agent_id);
+
+      // 2. Org/project-shared memories (org_id in member orgs, project_id null or in member projects)
+      if (orgList.length > 0) {
+        const orgPlaceholders = orgList.map(() => "?").join(", ");
+        if (projList.length > 0) {
+          const projPlaceholders = projList.map(() => "?").join(", ");
+          visibilityParts.push(`(org_id IN (${orgPlaceholders}) AND (project_id IS NULL OR project_id IN (${projPlaceholders})))`);
+          params.push(...orgList, ...projList);
+        } else {
+          visibilityParts.push(`(org_id IN (${orgPlaceholders}) AND project_id IS NULL)`);
+          params.push(...orgList);
+        }
+      }
+
+      // 3. Legacy backward compat: agent_id IS NULL with matching org/project
+      if (orgList.length > 0) {
+        const orgPlaceholders = orgList.map(() => "?").join(", ");
+        if (projList.length > 0) {
+          const projPlaceholders = projList.map(() => "?").join(", ");
+          visibilityParts.push(`(agent_id IS NULL AND org_id IN (${orgPlaceholders}) AND (project_id IS NULL OR project_id IN (${projPlaceholders})))`);
+          params.push(...orgList, ...projList);
+        } else {
+          visibilityParts.push(`(agent_id IS NULL AND org_id IN (${orgPlaceholders}))`);
+          params.push(...orgList);
+        }
+      } else {
+        // No org membership: only see own + legacy null-agent with null-org
+        visibilityParts.push("(agent_id IS NULL AND org_id IS NULL)");
+      }
+
+      conditions.push(`(${visibilityParts.join(" OR ")})`);
+    }
 
     if (memoryType) {
       conditions.push("memory_type = ?");
@@ -225,7 +288,8 @@ export class EngramStore {
     const sql = `SELECT * FROM memories WHERE ${conditions.join(" AND ")}`;
     const rows = this.db.prepare(sql).all(...params) as RawRow[];
 
-    // Compute cosine similarity, filter, sort, take top_k
+    // Compute cosine similarity with decay weighting, filter, sort, take top_k
+    const now = Date.now();
     const scored: SearchResult[] = [];
     for (const row of rows) {
       if (!row.embedding) continue;
@@ -234,10 +298,11 @@ export class EngramStore {
         (row.embedding as Buffer).byteOffset,
         (row.embedding as Buffer).byteLength / 4,
       );
-      const score = cosineSimilarity(queryEmb, rowEmbedding);
-      if (score >= threshold) {
-        scored.push({ ...this.rowToRecord(row), score });
-      }
+      const similarity = cosineSimilarity(queryEmb, rowEmbedding);
+      if (similarity < threshold) continue;
+      const decay = computeDecay(row, now);
+      const score = similarity * (1 - DECAY_BLEND) + similarity * decay * DECAY_BLEND;
+      scored.push({ ...this.rowToRecord(row), score });
     }
 
     return scored.sort((a, b) => b.score - a.score).slice(0, topK);
@@ -255,7 +320,8 @@ export class EngramStore {
     const { sql, params } = this.buildFilterQuery(opts);
     const rows = this.db.prepare(sql).all(...params) as RawRow[];
 
-    // Compute cosine similarity in JS (no sqlite-vec dependency for v1)
+    // Compute cosine similarity with decay weighting
+    const now = Date.now();
     const scored: SearchResult[] = [];
     for (const row of rows) {
       if (!row.embedding) continue;
@@ -264,10 +330,11 @@ export class EngramStore {
         (row.embedding as Buffer).byteOffset,
         (row.embedding as Buffer).byteLength / 4,
       );
-      const score = cosineSimilarity(queryEmbedding, rowEmbedding);
-      if (score >= threshold) {
-        scored.push({ ...this.rowToRecord(row), score });
-      }
+      const similarity = cosineSimilarity(queryEmbedding, rowEmbedding);
+      if (similarity < threshold) continue;
+      const decay = computeDecay(row, now);
+      const score = similarity * (1 - DECAY_BLEND) + similarity * decay * DECAY_BLEND;
+      scored.push({ ...this.rowToRecord(row), score });
     }
 
     return scored.sort((a, b) => b.score - a.score).slice(0, topK);
@@ -322,6 +389,19 @@ export class EngramStore {
     }
     const result = this.db.prepare("DELETE FROM memories WHERE user_id = ?").run(userId);
     return result.changes;
+  }
+
+  /**
+   * v0.4: Mark memories as recently recalled, resetting their decay clock.
+   */
+  touchRecalled(ids: string[]): void {
+    if (ids.length === 0) return;
+    const now = new Date().toISOString();
+    const stmt = this.db.prepare("UPDATE memories SET last_recalled_at = ? WHERE id = ?");
+    const tx = this.db.transaction(() => {
+      for (const id of ids) stmt.run(now, id);
+    });
+    tx();
   }
 
   close(): void {
@@ -426,6 +506,7 @@ export class EngramStore {
       metadata: row.metadata ? JSON.parse(row.metadata as string) : null,
       created_at: row.created_at,
       updated_at: row.updated_at,
+      last_recalled_at: row.last_recalled_at,
     };
   }
 }
@@ -442,6 +523,20 @@ interface RawRow {
   metadata: string | null;
   created_at: string;
   updated_at: string;
+  last_recalled_at: string | null;
+}
+
+/**
+ * v0.4: Compute decay factor for a memory based on how recently it was active.
+ * Returns a value between DECAY_FLOOR and 1.0.
+ * lastActive = max(last_recalled_at, updated_at, created_at)
+ */
+function computeDecay(row: RawRow, nowMs: number): number {
+  const lastActive = row.last_recalled_at ?? row.updated_at ?? row.created_at;
+  const lastActiveMs = new Date(lastActive).getTime();
+  const daysSince = Math.max(0, (nowMs - lastActiveMs) / (1000 * 60 * 60 * 24));
+  const factor = 1 / (1 + daysSince * DECAY_RATE);
+  return Math.max(DECAY_FLOOR, factor);
 }
 
 function cosineSimilarity(a: Float32Array, b: Float32Array): number {

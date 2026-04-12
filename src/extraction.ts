@@ -1,4 +1,8 @@
 // Engram Extraction Layer — LLM-driven memory extraction from conversations
+// v0.4: All requests routed through global Ollama queue to prevent model thrashing
+// v0.4.1: Added Gemini API provider for cloud-based extraction
+
+import { ollamaEnqueue } from "./ollama-queue.js";
 
 export interface ExtractionResult {
   facts: Array<{
@@ -25,19 +29,25 @@ export class OllamaLLMProvider implements LLMProvider {
   }
 
   async chat(messages: Array<{ role: string; content: string }>): Promise<string> {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 120_000);
+    return ollamaEnqueue(async (signal) => {
+      // Disable thinking mode via API parameter (reliable) + prompt hint (fallback)
+      const patchedMessages = messages.map((m, i) => {
+        if (i === 0 && m.role === "system") {
+          return { ...m, content: "/no_think\n" + m.content };
+        }
+        return m;
+      });
 
-    try {
       const resp = await fetch(`${this.baseUrl}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        signal: controller.signal,
+        signal,
         body: JSON.stringify({
           model: this.model,
-          messages,
+          messages: patchedMessages,
           stream: false,
-          options: { temperature: 0.1 },
+          think: false, // Ollama API: explicitly disable thinking mode
+          options: { temperature: 0.1, num_predict: 2048 },
         }),
       });
 
@@ -48,8 +58,65 @@ export class OllamaLLMProvider implements LLMProvider {
 
       const data = (await resp.json()) as { message: { content: string } };
       return data.message.content;
+    }, { timeoutMs: 300_000 });
+  }
+}
+
+export class GeminiLLMProvider implements LLMProvider {
+  private model: string;
+  private apiKey: string;
+
+  constructor(config: { model: string; apiKey: string }) {
+    this.model = config.model;
+    this.apiKey = config.apiKey;
+  }
+
+  async chat(messages: Array<{ role: string; content: string }>): Promise<string> {
+    // Gemini API: separate system instruction from conversation
+    const systemParts = messages.filter((m) => m.role === "system");
+    const convParts = messages.filter((m) => m.role !== "system");
+
+    const systemInstruction = systemParts.length > 0
+      ? { parts: [{ text: systemParts.map((m) => m.content).join("\n") }] }
+      : undefined;
+
+    const contents = convParts.map((m) => ({
+      role: m.role === "assistant" ? "model" : "user",
+      parts: [{ text: m.content }],
+    }));
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 60_000); // 60s for cloud API
+
+    try {
+      const resp = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:generateContent?key=${this.apiKey}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: controller.signal,
+          body: JSON.stringify({
+            ...(systemInstruction ? { systemInstruction } : {}),
+            contents,
+            generationConfig: { temperature: 0.1, maxOutputTokens: 2048 },
+          }),
+        },
+      );
+
+      if (!resp.ok) {
+        const body = await resp.text().catch(() => "");
+        throw new Error(`Gemini API failed (${resp.status}): ${body}`);
+      }
+
+      const data = (await resp.json()) as {
+        candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+      };
+
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!text) throw new Error("Gemini returned empty response");
+      return text;
     } finally {
-      clearTimeout(timeoutId);
+      clearTimeout(timer);
     }
   }
 }
@@ -80,6 +147,8 @@ For each fact, infer which organization and project it belongs to:
 - "project_id": the specific project this fact belongs to. Use null if not project-specific or uncertain.
 
 Assign dimensions based on the CONTENT of the fact, not just keyword presence. A fact about team processes belongs to that team's org. A fact about a specific product belongs to that product's project. Personal preferences or general knowledge should have null for both.
+
+IMPORTANT: When an entity is described as an independent organization with its own people, projects, and operations, assign it as its OWN org_id — even if it was created by or is related to another organization. Do NOT collapse it into the parent/creator org. For example, if org A creates a virtual company B for testing, facts about B's internal operations should use org_id=B, not org_id=A.
 
 ## Importance (0.0-1.0)
 - 1.0: Critical decisions, architecture choices
@@ -139,7 +208,7 @@ export async function extractMemories(
     contextParts.push(`Project-to-org mapping: ${mappings}. When you assign a project_id, automatically set org_id to its parent org.`);
   }
   if (contextParts.length > 0) {
-    systemPrompt += `\n\nAvailable dimensions:\n${contextParts.join("\n")}\nOnly use these exact identifiers for org_id/project_id. Use null for anything that doesn't clearly match.`;
+    systemPrompt += `\n\nAvailable dimensions:\n${contextParts.join("\n")}\nFor known entities, use these exact identifiers. For NEW organizations or projects not in the list above, output their name as-is for org_id/project_id — the system will auto-discover and register them. Only use null when the content is truly not organization/project-specific.`;
   }
 
   if (opts.customInstructions) {
