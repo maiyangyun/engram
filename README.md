@@ -246,7 +246,7 @@ Engram is one of three products under the **Cortex** umbrella — tools for maki
 
 | Product | Purpose |
 |---------|---------|
-| **Imprint** | Build expert-level agents from structured profile documents. *Helps agents know who they are.* |
+| [**Imprint**](https://github.com/maiyangyun/imprint) | Build expert-level agents from structured profile documents. *Helps agents know who they are.* |
 | **Engram** | Multi-agent collaborative memory system. *Helps agents accumulate and share experience.* |
 | **Synapse** | Agent-first human-agent collaboration workspace. *Helps agents work alongside humans.* |
 
