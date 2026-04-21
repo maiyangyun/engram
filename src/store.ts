@@ -70,10 +70,23 @@ export interface ListOptions {
 }
 
 export interface AddMemoryResult extends MemoryRecord {
-  dedupAction: "added" | "updated";
+  dedupAction: "added" | "updated" | "pending";
 }
 
-const DEDUP_THRESHOLD = 0.88;
+export interface PendingDedup {
+  id: string;
+  new_memory_id: string;
+  existing_memory_id: string;
+  similarity: number;
+  status: "pending" | "confirmed_dup" | "confirmed_distinct";
+  created_at: string;
+  resolved_at: string | null;
+}
+
+const DEDUP_THRESHOLD_SAME_SCOPE = 0.88;
+const DEDUP_THRESHOLD_CROSS_SCOPE = 0.92;
+const DEDUP_GRAY_ZONE_LOW = 0.85;
+// Gray zone: DEDUP_GRAY_ZONE_LOW (0.85) to DEDUP_THRESHOLD_CROSS_SCOPE (0.92)
 
 // v0.4: Memory decay constants
 // Memories lose relevance over time unless recalled. The decay function is:
@@ -126,65 +139,102 @@ export class EngramStore {
     } catch {
       // Column already exists — expected on subsequent runs
     }
+
+    // v0.5: Pending dedup table for gray-zone review
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS pending_dedup (
+        id TEXT PRIMARY KEY,
+        new_memory_id TEXT NOT NULL,
+        existing_memory_id TEXT NOT NULL,
+        similarity REAL NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'confirmed_dup', 'confirmed_distinct')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        resolved_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_pending_dedup_status ON pending_dedup(status);
+    `);
   }
 
   add(input: AddMemoryInput): AddMemoryResult {
-    // Dedup check: if embedding provided, look for similar memories in the same dimensional scope
+    // v0.5: Normalize dimensions at entry point
+    const normOrgId = input.org_id ? input.org_id.toLowerCase().trim() : null;
+    const normProjectId = input.project_id ? input.project_id.toLowerCase().trim() : null;
+    const normAgentId = input.agent_id ?? null;
+
     if (input.embedding) {
-      const similar = this.findSimilar(input.embedding, DEDUP_THRESHOLD, {
+      // Layer 1: Cross-scope dedup — search by user_id only, high threshold
+      const globalSimilar = this.findSimilarGlobal(input.embedding, DEDUP_GRAY_ZONE_LOW, input.user_id);
+
+      if (globalSimilar.length > 0) {
+        const best = globalSimilar[0];
+
+        if (best.score >= DEDUP_THRESHOLD_CROSS_SCOPE) {
+          // High confidence duplicate across any scope → update existing
+          this.update(best.id, input.content, input.embedding);
+          const updated = this.get(best.id)!;
+          return { ...updated, dedupAction: "updated" };
+        }
+
+        if (best.score >= DEDUP_GRAY_ZONE_LOW) {
+          // Gray zone — write the new memory but record pending dedup for user review
+          const newId = this._insertMemory(input.user_id, normAgentId, normOrgId, normProjectId, input.memory_type, input.content, input.embedding, input.metadata);
+          this._addPendingDedup(newId, best.id, best.score);
+          const record = this.get(newId)!;
+          return { ...record, dedupAction: "pending" };
+        }
+      }
+
+      // Layer 2: Same-scope dedup — existing logic with normalized dimensions
+      const scopedSimilar = this.findSimilar(input.embedding, DEDUP_THRESHOLD_SAME_SCOPE, {
         user_id: input.user_id,
-        agent_id: input.agent_id ?? null,
-        org_id: input.org_id ?? null,
-        project_id: input.project_id ?? null,
+        agent_id: normAgentId,
+        org_id: normOrgId,
+        project_id: normProjectId,
       });
 
-      if (similar.length > 0) {
-        const existing = similar[0];
+      if (scopedSimilar.length > 0) {
+        const existing = scopedSimilar[0];
         this.update(existing.id, input.content, input.embedding);
         const updated = this.get(existing.id)!;
         return { ...updated, dedupAction: "updated" };
       }
     }
 
+    const newId = this._insertMemory(input.user_id, normAgentId, normOrgId, normProjectId, input.memory_type, input.content, input.embedding, input.metadata);
+    const record = this.get(newId)!;
+    return { ...record, dedupAction: "added" };
+  }
+
+  private _insertMemory(
+    userId: string, agentId: string | null, orgId: string | null, projectId: string | null,
+    memoryType: MemoryType, content: string, embedding?: number[], metadata?: Record<string, unknown>,
+  ): string {
     const id = crypto.randomUUID();
     const now = new Date().toISOString();
-    const embeddingBlob = input.embedding
-      ? Buffer.from(new Float32Array(input.embedding).buffer)
-      : null;
-    const metadataJson = input.metadata ? JSON.stringify(input.metadata) : null;
+    const embeddingBlob = embedding ? Buffer.from(new Float32Array(embedding).buffer) : null;
+    const metadataJson = metadata ? JSON.stringify(metadata) : null;
 
     this.db.prepare(`
       INSERT INTO memories (id, user_id, agent_id, org_id, project_id, memory_type, content, embedding, metadata, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      input.user_id,
-      input.agent_id ?? null,
-      input.org_id ?? null,
-      input.project_id ?? null,
-      input.memory_type,
-      input.content,
-      embeddingBlob,
-      metadataJson,
-      now,
-      now,
-    );
+    `).run(id, userId, agentId, orgId, projectId, memoryType, content, embeddingBlob, metadataJson, now, now);
 
-    return {
-      id,
-      user_id: input.user_id,
-      agent_id: input.agent_id ?? null,
-      org_id: input.org_id ?? null,
-      project_id: input.project_id ?? null,
-      memory_type: input.memory_type,
-      content: input.content,
-      embedding: input.embedding ? new Float32Array(input.embedding) : null,
-      metadata: input.metadata ?? null,
-      created_at: now,
-      updated_at: now,
-      last_recalled_at: null,
-      dedupAction: "added",
-    };
+    return id;
+  }
+
+  private _addPendingDedup(newMemoryId: string, existingMemoryId: string, similarity: number): void {
+    // Skip if this pair already has a resolved record (confirmed_distinct)
+    const existing = this.db.prepare(
+      `SELECT id FROM pending_dedup WHERE
+        ((new_memory_id = ? AND existing_memory_id = ?) OR (new_memory_id = ? AND existing_memory_id = ?))
+        AND status = 'confirmed_distinct'`
+    ).get(existingMemoryId, newMemoryId, newMemoryId, existingMemoryId) as { id: string } | undefined;
+    if (existing) return;
+
+    this.db.prepare(`
+      INSERT INTO pending_dedup (id, new_memory_id, existing_memory_id, similarity, created_at)
+      VALUES (?, ?, ?, ?, datetime('now'))
+    `).run(crypto.randomUUID(), newMemoryId, existingMemoryId, similarity);
   }
 
   get(id: string): MemoryRecord | null {
@@ -405,8 +455,73 @@ export class EngramStore {
     tx();
   }
 
+  // --- Pending dedup methods ---
+
+  getPendingDedups(limit = 10): PendingDedup[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM pending_dedup WHERE status = 'pending' ORDER BY created_at ASC LIMIT ?`
+    ).all(limit) as PendingDedup[];
+    return rows;
+  }
+
+  getPendingDedupCount(): number {
+    const row = this.db.prepare(
+      `SELECT COUNT(*) as cnt FROM pending_dedup WHERE status = 'pending'`
+    ).get() as { cnt: number };
+    return row.cnt;
+  }
+
+  resolvePendingDedup(id: string, action: "confirmed_dup" | "confirmed_distinct"): boolean {
+    const now = new Date().toISOString();
+    const pending = this.db.prepare(`SELECT * FROM pending_dedup WHERE id = ?`).get(id) as PendingDedup | undefined;
+    if (!pending) return false;
+
+    if (action === "confirmed_dup") {
+      // Merge: keep the existing (older) memory, delete the newer one
+      // But first update existing with newer content if it's longer/better
+      const newMem = this.get(pending.new_memory_id);
+      const existingMem = this.get(pending.existing_memory_id);
+      if (newMem && existingMem && newMem.content.length > existingMem.content.length) {
+        this.update(existingMem.id, newMem.content, newMem.embedding ? Array.from(newMem.embedding) : undefined);
+      }
+      if (newMem) this.delete(pending.new_memory_id);
+    }
+
+    this.db.prepare(
+      `UPDATE pending_dedup SET status = ?, resolved_at = ? WHERE id = ?`
+    ).run(action, now, id);
+    return true;
+  }
+
   close(): void {
     this.db.close();
+  }
+
+  /**
+   * v0.5: Global similarity search — only filters by user_id, ignores all dimensional scopes.
+   * Used for cross-scope dedup detection.
+   */
+  findSimilarGlobal(embedding: number[], threshold: number, userId: string): SearchResult[] {
+    const queryEmbedding = new Float32Array(embedding);
+    const rows = this.db.prepare(
+      `SELECT * FROM memories WHERE user_id = ? AND embedding IS NOT NULL`
+    ).all(userId) as RawRow[];
+
+    const scored: SearchResult[] = [];
+    for (const row of rows) {
+      if (!row.embedding) continue;
+      const rowEmbedding = new Float32Array(
+        (row.embedding as Buffer).buffer,
+        (row.embedding as Buffer).byteOffset,
+        (row.embedding as Buffer).byteLength / 4,
+      );
+      const score = cosineSimilarity(queryEmbedding, rowEmbedding);
+      if (score >= threshold) {
+        scored.push({ ...this.rowToRecord(row), score });
+      }
+    }
+
+    return scored.sort((a, b) => b.score - a.score);
   }
 
   findSimilar(

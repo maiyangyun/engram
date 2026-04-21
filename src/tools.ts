@@ -211,14 +211,19 @@ export function createMemoryAddTool(deps: ToolDeps) {
 
         const added = results.filter(r => r.dedupAction === "added").length;
         const updated = results.filter(r => r.dedupAction === "updated").length;
-        const dedupInfo = updated > 0 ? ` (${added} added, ${updated} updated)` : "";
+        const pending = results.filter(r => r.dedupAction === "pending").length;
+        const parts: string[] = [];
+        if (added > 0) parts.push(`${added} added`);
+        if (updated > 0) parts.push(`${updated} updated`);
+        if (pending > 0) parts.push(`${pending} pending-review`);
+        const dedupInfo = parts.length > 0 ? ` (${parts.join(", ")})` : "";
 
         return jsonResult({
           results: results.map((r) => ({
             id: r.id,
             memory: r.content,
             memory_type: r.memory_type,
-            event: r.dedupAction === "updated" ? "UPDATE" : "ADD",
+            event: r.dedupAction === "updated" ? "UPDATE" : r.dedupAction === "pending" ? "PENDING_REVIEW" : "ADD",
             dedupAction: r.dedupAction,
           })),
           summary: `${results.length} memories processed${dedupInfo}`,
@@ -331,6 +336,65 @@ export function createMemoryDeleteTool(deps: ToolDeps) {
       }
 
       return textResult("Provide memoryId or all: true to delete memories.");
+    },
+  };
+}
+
+export function createDedupReviewTool(deps: ToolDeps) {
+  return {
+    name: "engram_dedup_review",
+    description: "Fetch pending memory dedup pairs for user review. Present each pair and ask the user whether they refer to the same thing. Use 'resolve' action to confirm the user's decision.",
+    parameters: Type.Object({
+      action: Type.Union([
+        Type.Literal("list"),
+        Type.Literal("resolve"),
+      ], { description: "'list' to fetch pending pairs, 'resolve' to act on user decision" }),
+      pendingId: Type.Optional(Type.String({ description: "Pending dedup record ID (for resolve)" })),
+      decision: Type.Optional(Type.Union([
+        Type.Literal("duplicate"),
+        Type.Literal("distinct"),
+      ], { description: "User's decision: 'duplicate' to merge, 'distinct' to keep both" })),
+      limit: Type.Optional(Type.Number({ description: "Max pairs to fetch (default 5)" })),
+    }),
+    async execute(_id: string, params: Record<string, unknown>) {
+      const action = params.action as string;
+
+      if (action === "list") {
+        const limit = (params.limit as number) || 5;
+        const pendings = deps.store.getPendingDedups(limit);
+        if (pendings.length === 0) {
+          return textResult("No pending dedup reviews.");
+        }
+
+        const pairs = pendings.map((p) => {
+          const newMem = deps.store.get(p.new_memory_id);
+          const existMem = deps.store.get(p.existing_memory_id);
+          return {
+            pending_id: p.id,
+            similarity: p.similarity.toFixed(3),
+            memory_a: existMem ? { id: existMem.id, content: existMem.content, agent_id: existMem.agent_id, org_id: existMem.org_id, project_id: existMem.project_id, type: existMem.memory_type } : { id: p.existing_memory_id, content: "[deleted]" },
+            memory_b: newMem ? { id: newMem.id, content: newMem.content, agent_id: newMem.agent_id, org_id: newMem.org_id, project_id: newMem.project_id, type: newMem.memory_type } : { id: p.new_memory_id, content: "[deleted]" },
+          };
+        });
+
+        const total = deps.store.getPendingDedupCount();
+        return jsonResult({ total_pending: total, showing: pairs.length, pairs });
+      }
+
+      if (action === "resolve") {
+        const pendingId = params.pendingId as string;
+        const decision = params.decision as string;
+        if (!pendingId || !decision) {
+          return textResult("resolve requires pendingId and decision.");
+        }
+        const status = decision === "duplicate" ? "confirmed_dup" : "confirmed_distinct";
+        const ok = deps.store.resolvePendingDedup(pendingId, status as "confirmed_dup" | "confirmed_distinct");
+        if (!ok) return textResult(`Pending dedup record not found: ${pendingId}`);
+        deps.logger.info(`engram: dedup resolved ${pendingId} as ${status}`);
+        return textResult(`Resolved as ${decision}. ${decision === "duplicate" ? "Memories merged." : "Kept both memories."}`);
+      }
+
+      return textResult("Unknown action. Use 'list' or 'resolve'.");
     },
   };
 }

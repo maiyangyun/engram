@@ -209,6 +209,35 @@ Engram registers six tools, compatible with the OpenClaw memory interface:
 | `dbPath` | `~/.engram/engram.db` | SQLite database path |
 | `searchThreshold` | `0.5` | Minimum similarity score (0-1) |
 | `topK` | `10` | Max memories per search |
+| `recallMaxResults` | `8` | Hard cap on injected recall memories |
+| `recallScoreGap` | `0.08` | Truncate recalled memories when adjacent score gap is large |
+| `recallHighConfidence` | `0.75` | High-confidence recall threshold |
+| `recallShortMsgMaxResults` | `3` | Max recalled memories for short prompts (<20 chars) |
+| `recallStatsLog` | `true` | Log recall experiment stats |
+| `extractionWindowMessages` | `30` | Standard full extraction inspects the latest N messages |
+| `extractionWindowChars` | `8000` | Character cap for standard full extraction window |
+| `extractionPressureWindowMessages` | `50` | Pressure-triggered extraction inspects the latest N messages |
+| `extractionPressureWindowChars` | `16000` | Character cap for pressure-triggered extraction window |
+
+### Extraction Window Tuning
+
+Engram uses two extraction windows for `autoCapture` full extraction:
+
+- **Standard full extraction** — used for normal longer conversations
+- **Pressure-triggered extraction** — used when context pressure is high and Engram proactively captures before compaction risk grows
+
+Defaults:
+
+```json
+{
+  "extractionWindowMessages": 30,
+  "extractionWindowChars": 8000,
+  "extractionPressureWindowMessages": 50,
+  "extractionPressureWindowChars": 16000
+}
+```
+
+This replaces the old fixed behavior that only inspected a much narrower recent slice. Raising these values improves capture completeness for long planning threads, at the cost of more extraction tokens and slightly slower capture.
 
 ### Dimension Configuration (~/.engram/dimensions.json)
 
@@ -255,6 +284,37 @@ Engram is one of three products under the **Cortex** umbrella — tools for maki
 ---
 
 ## Changelog
+
+### v0.5.0-beta.1 (2026-04-22)
+
+**Recall Precision (P0-1):**
+- Raised `searchThreshold` from 0.50 to 0.62 based on baseline analysis of 1922 memories × 50 simulated queries
+- New `applySmartTruncation()` — score gap truncation (0.08), hard cap (8), short-message limit (3), high-confidence filter (0.75)
+- Six new tunable recall parameters: `recallMaxResults`, `recallScoreGap`, `recallHighConfidence`, `recallShortMsgMaxResults`, `recallStatsLog`
+- Added `[recall-stats]` experiment logging for production observation
+
+**Memory Deduplication (P0-2):**
+- Bulk cleanup: 1950 → 1788 memories (162 duplicates removed)
+  - 25 exact duplicates deleted, 57 high-similarity (0.95+) auto-merged, 86 confirmed merges (0.90-0.95)
+- Incremental dedup: two-tier thresholds (cross-dimension 0.92, same-dimension 0.88)
+- Gray zone (0.85-0.92) written to `pending_dedup` table for human review
+- New `engram_dedup_review` tool (list / resolve) for interactive dedup confirmation
+- Input normalization: `org_id`/`project_id` now `toLowerCase().trim()` at entry
+
+**Data Cleanup (P0-3):**
+- Migrated all `agent_id=NULL` and `agent_id='main'` records to proper agent names
+- Normalized `org_id` variants (e.g. `cortex-team` → `cortex`, `bonbon-team` → `bonbon`)
+- New `agentAliases` config for automatic agent ID mapping (e.g. `main` → `ben`)
+
+**Extraction Window (P1-4):**
+- Replaced fixed narrow extraction window (20 messages / 4000 chars) with configurable adaptive windows
+- Standard full extraction: default 30 messages / 8000 chars
+- Pressure-triggered extraction: default 50 messages / 16000 chars
+- Four new config parameters: `extractionWindowMessages`, `extractionWindowChars`, `extractionPressureWindowMessages`, `extractionPressureWindowChars`
+
+**Compatibility:**
+- No schema breaking changes from v0.4.1
+- All new config parameters have sensible defaults — zero-config upgrade
 
 ### v0.4.1 (2026-04-21)
 

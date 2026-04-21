@@ -41,6 +41,17 @@ export interface EngramConfig {
   dbPath: string;
   searchThreshold: number;
   topK: number;
+  // v0.5: Recall precision tuning
+  recallMaxResults: number;       // Hard cap on injected memories (default: 8)
+  recallScoreGap: number;         // Truncate at score gap > this (default: 0.08)
+  recallHighConfidence: number;   // Score above this = high confidence (default: 0.75)
+  recallShortMsgMaxResults: number; // Max results for short messages <20 chars (default: 3)
+  recallStatsLog: boolean;        // Log recall stats for experiment tracking (default: true)
+  // v0.5: Extraction window tuning
+  extractionWindowMessages: number;         // Standard full extraction window size (default: 30)
+  extractionWindowChars: number;            // Standard full extraction char cap (default: 8000)
+  extractionPressureWindowMessages: number; // Pressure-triggered extraction window size (default: 50)
+  extractionPressureWindowChars: number;    // Pressure-triggered extraction char cap (default: 16000)
   customInstructions: string | null;
   // Flat string arrays (backward compat, used by extraction prompt)
   knownOrgs: string[];
@@ -50,6 +61,8 @@ export interface EngramConfig {
   dimensionProjects: DimensionProject[];
   projectOrgMap: Record<string, string>; // project_id → org_id
   agents: Record<string, AgentConfig>;
+  // v0.5: Agent ID alias mapping (e.g. { "main": "ben" })
+  agentAliases: Record<string, string>;
   // v2: Mutable request-scoped agent context (set by hooks, read by tools)
   _activeAgentId: string | null;
 }
@@ -76,8 +89,18 @@ export function parseConfig(raw: Record<string, unknown>): EngramConfig {
     geminiApiKey: (raw.geminiApiKey as string) || resolveGeminiApiKey(dbPath),
     ollamaBaseUrl: (raw.ollamaBaseUrl as string) || "http://localhost:11434",
     dbPath,
-    searchThreshold: typeof raw.searchThreshold === "number" ? raw.searchThreshold : 0.5,
+    searchThreshold: typeof raw.searchThreshold === "number" ? raw.searchThreshold : 0.62,
     topK: typeof raw.topK === "number" ? raw.topK : 10,
+    // v0.5: Recall precision
+    recallMaxResults: typeof raw.recallMaxResults === "number" ? raw.recallMaxResults : 8,
+    recallScoreGap: typeof raw.recallScoreGap === "number" ? raw.recallScoreGap : 0.08,
+    recallHighConfidence: typeof raw.recallHighConfidence === "number" ? raw.recallHighConfidence : 0.75,
+    recallShortMsgMaxResults: typeof raw.recallShortMsgMaxResults === "number" ? raw.recallShortMsgMaxResults : 3,
+    recallStatsLog: raw.recallStatsLog !== false,
+    extractionWindowMessages: typeof raw.extractionWindowMessages === "number" ? raw.extractionWindowMessages : 30,
+    extractionWindowChars: typeof raw.extractionWindowChars === "number" ? raw.extractionWindowChars : 8000,
+    extractionPressureWindowMessages: typeof raw.extractionPressureWindowMessages === "number" ? raw.extractionPressureWindowMessages : 50,
+    extractionPressureWindowChars: typeof raw.extractionPressureWindowChars === "number" ? raw.extractionPressureWindowChars : 16000,
     customInstructions: (raw.customInstructions as string) || null,
     knownOrgs: Array.isArray(raw.knownOrgs) ? raw.knownOrgs as string[] : dims.knownOrgs,
     knownProjects: Array.isArray(raw.knownProjects) ? raw.knownProjects as string[] : dims.knownProjects,
@@ -85,6 +108,7 @@ export function parseConfig(raw: Record<string, unknown>): EngramConfig {
     dimensionProjects: dims.dimensionProjects,
     projectOrgMap: dims.projectOrgMap,
     agents: dims.agents,
+    agentAliases: parseAgentAliases(raw.agentAliases),
     _activeAgentId: null,
   };
 }
@@ -112,6 +136,15 @@ function resolveGeminiApiKey(dbPath: string): string | null {
 }
 
 export const VALID_MEMORY_TYPES: readonly MemoryType[] = ["semantic", "episodic", "procedural"] as const;
+
+function parseAgentAliases(raw: unknown): Record<string, string> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const result: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof v === "string") result[k] = v;
+  }
+  return result;
+}
 
 interface DimensionsResult {
   knownOrgs: string[];

@@ -14,6 +14,7 @@ import {
   createMemoryListTool,
   createMemoryUpdateTool,
   createMemoryDeleteTool,
+  createDedupReviewTool,
 } from "./tools.js";
 import { registerAutoRecall, registerAutoCapture } from "./hooks.js";
 
@@ -44,6 +45,15 @@ const engramConfigSchema = {
       dbPath: { type: "string", description: "Path to SQLite database file" },
       searchThreshold: { type: "number", description: "Minimum similarity score for search results (0-1)" },
       topK: { type: "number", description: "Maximum number of memories to retrieve per search" },
+      recallMaxResults: { type: "number", description: "Hard cap on recalled memories injected into context" },
+      recallScoreGap: { type: "number", description: "Truncate recall results when score drops sharply between adjacent memories" },
+      recallHighConfidence: { type: "number", description: "High-confidence recall score threshold" },
+      recallShortMsgMaxResults: { type: "number", description: "Max recalled memories for short prompts" },
+      recallStatsLog: { type: "boolean", description: "Log detailed recall experiment stats" },
+      extractionWindowMessages: { type: "number", description: "How many recent messages full extraction inspects" },
+      extractionWindowChars: { type: "number", description: "Character cap for standard full extraction window" },
+      extractionPressureWindowMessages: { type: "number", description: "How many recent messages pressure-triggered extraction inspects" },
+      extractionPressureWindowChars: { type: "number", description: "Character cap for pressure-triggered extraction window" },
       customInstructions: { type: "string", description: "Custom instructions for memory extraction LLM" },
       knownOrgs: { type: "array", items: { type: "string" }, description: "Known organization identifiers for LLM dimension inference" },
       knownProjects: { type: "array", items: { type: "string" }, description: "Known project identifiers for LLM dimension inference" },
@@ -61,6 +71,15 @@ const engramConfigSchema = {
     "dbPath": { label: "Database Path", placeholder: "~/.engram/engram.db" },
     "searchThreshold": { label: "Search Threshold", placeholder: "0.5" },
     "topK": { label: "Top K Results", placeholder: "10" },
+    "recallMaxResults": { label: "Recall Max Results", placeholder: "8" },
+    "recallScoreGap": { label: "Recall Score Gap", placeholder: "0.08" },
+    "recallHighConfidence": { label: "Recall High Confidence", placeholder: "0.75" },
+    "recallShortMsgMaxResults": { label: "Recall Short Msg Max", placeholder: "3" },
+    "recallStatsLog": { label: "Recall Stats Log" },
+    "extractionWindowMessages": { label: "Extraction Window Messages", placeholder: "30" },
+    "extractionWindowChars": { label: "Extraction Window Chars", placeholder: "8000" },
+    "extractionPressureWindowMessages": { label: "Pressure Extraction Messages", placeholder: "50" },
+    "extractionPressureWindowChars": { label: "Pressure Extraction Chars", placeholder: "16000" },
     "customInstructions": { label: "Custom Instructions" },
     "knownOrgs": { label: "Known Organizations", help: "Organization IDs the LLM can assign to memories" },
     "knownProjects": { label: "Known Projects", help: "Project IDs the LLM can assign to memories" },
@@ -110,6 +129,7 @@ const engramPlugin = definePluginEntry({
     api.registerTool(createMemoryListTool(toolDeps));
     api.registerTool(createMemoryUpdateTool(toolDeps));
     api.registerTool(createMemoryDeleteTool(toolDeps));
+    api.registerTool(createDedupReviewTool(toolDeps));
 
     // Register hooks
     const hookDeps = { api: api as unknown as Parameters<typeof registerAutoRecall>[0]["api"], store, embedder, llm, config: cfg };

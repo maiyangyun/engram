@@ -94,6 +94,15 @@ function truncateMessages(
   return result;
 }
 
+function buildExtractionWindow(
+  messages: Array<{ role: string; content: string }>,
+  maxMessages: number,
+  maxChars: number,
+): Array<{ role: string; content: string }> {
+  const recentWindow = messages.slice(-Math.max(1, maxMessages));
+  return truncateMessages(recentWindow, Math.max(500, maxChars));
+}
+
 function resolveSessionContext(
   config: EngramConfig,
   sessionId?: string,
@@ -102,6 +111,11 @@ function resolveSessionContext(
   if (sessionId) {
     const match = sessionId.match(/^agent:([^:]+)/);
     if (match) agentId = match[1];
+  }
+
+  // v0.5: Apply agent alias mapping (e.g. "main" → "ben")
+  if (agentId && config.agentAliases[agentId]) {
+    agentId = config.agentAliases[agentId];
   }
 
   return {
@@ -300,11 +314,11 @@ export function registerAutoRecall(deps: HookDeps): void {
       const t1 = Date.now();
       deps.api.logger.info(`engram: [recall-timing] embed=${t1 - t0}ms`);
 
-      let results: SearchResult[];
+      let rawResults: SearchResult[];
 
       if (sessionCtx.agent_id) {
         const membership = resolveAgentMembership(deps.config, sessionCtx.agent_id);
-        results = deps.store.searchWithVisibility(
+        rawResults = deps.store.searchWithVisibility(
           {
             user_id: deps.config.userId,
             agent_id: sessionCtx.agent_id,
@@ -319,13 +333,18 @@ export function registerAutoRecall(deps: HookDeps): void {
           deps.config.searchThreshold,
         );
       } else {
-        results = deps.store.vectorSearch({
+        rawResults = deps.store.vectorSearch({
           user_id: deps.config.userId,
           embedding,
           top_k: deps.config.topK,
           threshold: deps.config.searchThreshold,
         });
       }
+
+      if (rawResults.length === 0) return undefined;
+
+      // v0.5: Smart truncation — score gap + scene-aware limits
+      const results = applySmartTruncation(rawResults, cleanPrompt, deps.config);
 
       if (results.length === 0) return undefined;
 
@@ -344,16 +363,36 @@ export function registerAutoRecall(deps: HookDeps): void {
       // v0.4: Touch recalled memories to reset their decay clock
       deps.store.touchRecalled(results.map((r) => r.id));
       const t2 = Date.now();
-      deps.api.logger.info(`engram: [recall-timing] embed=${t1 - t0}ms search=${t2 - t1}ms total=${t2 - t0}ms results=${results.length}`);
 
-      deps.api.logger.info(`engram: injecting ${results.length} memories into context`);
+      // v0.5: Experiment stats logging
+      if (deps.config.recallStatsLog) {
+        const scores = results.map(r => r.score);
+        const avgScore = scores.reduce((a, b) => a + b, 0) / scores.length;
+        const tokenEstimate = memoryContext.length / 3.5; // rough CJK token estimate
+        deps.api.logger.info(`engram: [recall-stats] raw=${rawResults.length} final=${results.length} avgScore=${avgScore.toFixed(3)} minScore=${scores[scores.length - 1]?.toFixed(3)} maxScore=${scores[0]?.toFixed(3)} tokens≈${Math.round(tokenEstimate)} promptLen=${cleanPrompt.length} embed=${t1 - t0}ms search=${t2 - t1}ms total=${t2 - t0}ms`);
+      } else {
+        deps.api.logger.info(`engram: [recall-timing] embed=${t1 - t0}ms search=${t2 - t1}ms total=${t2 - t0}ms results=${results.length}`);
+      }
+
+      deps.api.logger.info(`engram: injecting ${results.length} memories into context (was ${rawResults.length} before truncation)`);
 
       const preamble = isSubagent
         ? `The following are stored memories for user "${deps.config.userId}". You are a subagent — use these memories for context but do not assume you are this user.`
         : `The following are stored memories for user "${deps.config.userId}". Use them to personalize your response:`;
 
+      // v0.5: Check for pending dedup reviews to surface to user
+      let dedupNotice = "";
+      if (!isSubagent) {
+        try {
+          const pendingCount = deps.store.getPendingDedupCount();
+          if (pendingCount >= 5) {
+            dedupNotice = `\n\n<engram-dedup-review>\nYou have ${pendingCount} pending memory dedup reviews. When the conversation reaches a natural pause, proactively ask the user to review them. Use the engram_dedup_review tool to fetch and present the pairs.\n</engram-dedup-review>`;
+          }
+        } catch { /* non-critical */ }
+      }
+
       return {
-        prependContext: `<relevant-memories>\n${preamble}\n${memoryContext}\n</relevant-memories>`,
+        prependContext: `<relevant-memories>\n${preamble}\n${memoryContext}\n</relevant-memories>${dedupNotice}`,
       };
     };
 
@@ -373,6 +412,58 @@ export function registerAutoRecall(deps: HookDeps): void {
       deps.api.logger.warn(`engram: recall failed: ${String(err)}`);
     }
   });
+}
+
+/**
+ * v0.5: Smart truncation — reduces injected memories based on:
+ * 1. Hard cap (recallMaxResults)
+ * 2. Score gap detection (large drop between consecutive results = natural boundary)
+ * 3. High-confidence-only mode (if few results are highly relevant, only return those)
+ * 4. Short message awareness (reduce results for brief queries)
+ */
+function applySmartTruncation(
+  results: SearchResult[],
+  prompt: string,
+  config: EngramConfig,
+): SearchResult[] {
+  if (results.length === 0) return results;
+
+  // Already sorted by score desc from store
+  let maxResults = config.recallMaxResults;
+
+  // Scene-aware: short messages get fewer results
+  if (prompt.length < 20) {
+    maxResults = Math.min(maxResults, config.recallShortMsgMaxResults);
+  }
+
+  // Apply hard cap first
+  let truncated = results.slice(0, maxResults);
+
+  // Score gap detection: find natural boundary where relevance drops sharply
+  if (truncated.length > 1) {
+    for (let i = 0; i < truncated.length - 1; i++) {
+      const gap = truncated[i].score - truncated[i + 1].score;
+      if (gap > config.recallScoreGap) {
+        truncated = truncated.slice(0, i + 1);
+        break;
+      }
+    }
+  }
+
+  // High-confidence filter: if only a few results are truly relevant,
+  // don't pad with marginal ones
+  const highConf = truncated.filter(r => r.score >= config.recallHighConfidence);
+  if (highConf.length > 0 && highConf.length <= 3 && truncated.length > highConf.length) {
+    // Check if the rest are significantly weaker
+    const restAvg = truncated
+      .filter(r => r.score < config.recallHighConfidence)
+      .reduce((sum, r) => sum + r.score, 0) / (truncated.length - highConf.length);
+    if (config.recallHighConfidence - restAvg > 0.1) {
+      truncated = highConf;
+    }
+  }
+
+  return truncated;
 }
 
 // --- autoCapture ---
@@ -488,10 +579,13 @@ export function registerAutoCapture(deps: HookDeps): void {
     // T9: Under context pressure, force full extraction even for short content
     if (underPressure && enoughInterval) {
       deps.api.logger.info(`engram: [T9] context pressure detected (msgs=${pressure.msgCount}, chars=${pressure.totalChars}, sinceLastFull=${msgSinceLastFull}) — forcing full extraction`);
-      const recentWindow = parsed.slice(-20);
-      const truncated = truncateMessages(recentWindow, 4000);
+      const extractionWindow = buildExtractionWindow(
+        parsed,
+        deps.config.extractionPressureWindowMessages,
+        deps.config.extractionPressureWindowChars,
+      );
       enqueueCapture("pressure-full", async () => {
-        await extractAndStore(deps, truncated, sessionCtx);
+        await extractAndStore(deps, extractionWindow, sessionCtx);
         const p = sessionPressure.get(sessKey);
         if (p) {
           p.lastFullCaptureAt = p.msgCount;
@@ -506,11 +600,14 @@ export function registerAutoCapture(deps: HookDeps): void {
       return;
     }
 
-    const recentWindow = parsed.slice(-20);
-    const truncated = truncateMessages(recentWindow, 4000);
+    const extractionWindow = buildExtractionWindow(
+      parsed,
+      deps.config.extractionWindowMessages,
+      deps.config.extractionWindowChars,
+    );
 
     enqueueCapture("full", async () => {
-      await extractAndStore(deps, truncated, sessionCtx);
+      await extractAndStore(deps, extractionWindow, sessionCtx);
       const p = sessionPressure.get(sessKey);
       if (p) {
         p.lastFullCaptureAt = p.msgCount;
@@ -616,6 +713,7 @@ async function extractAndStore(
 
   let addedCount = 0;
   let updatedCount = 0;
+  let pendingCount = 0;
 
   for (let i = 0; i < worthKeeping.length; i++) {
     const fact = worthKeeping[i];
@@ -640,10 +738,15 @@ async function extractAndStore(
     });
 
     if (result.dedupAction === "added") addedCount++;
-    else updatedCount++;
+    else if (result.dedupAction === "updated") updatedCount++;
+    else pendingCount++;
   }
 
-  const dedupStats = updatedCount > 0 ? ` (${addedCount} added, ${updatedCount} updated)` : "";
+  const statParts: string[] = [];
+  if (addedCount > 0) statParts.push(`${addedCount} added`);
+  if (updatedCount > 0) statParts.push(`${updatedCount} updated`);
+  if (pendingCount > 0) statParts.push(`${pendingCount} pending-review`);
+  const dedupStats = statParts.length > 0 ? ` (${statParts.join(", ")})` : "";
   deps.api.logger.info(
     `engram: auto-captured ${worthKeeping.length} memories (${worthKeeping.map((f) => f.memory_type).join(", ")})${dedupStats}`
   );

@@ -70,6 +70,59 @@
       "label": "Top K Results",
       "placeholder": "10",
       "help": "Maximum number of memories to retrieve per search"
+    },
+    "recallMaxResults": {
+      "label": "Recall Max Results",
+      "placeholder": "8",
+      "help": "Hard cap on recalled memories injected into context",
+      "advanced": true
+    },
+    "recallScoreGap": {
+      "label": "Recall Score Gap",
+      "placeholder": "0.08",
+      "help": "Truncate recall results when score drops sharply between adjacent memories",
+      "advanced": true
+    },
+    "recallHighConfidence": {
+      "label": "Recall High Confidence",
+      "placeholder": "0.75",
+      "help": "High-confidence recall score threshold",
+      "advanced": true
+    },
+    "recallShortMsgMaxResults": {
+      "label": "Recall Short Msg Max",
+      "placeholder": "3",
+      "help": "Max recalled memories for short prompts",
+      "advanced": true
+    },
+    "recallStatsLog": {
+      "label": "Recall Stats Log",
+      "help": "Log detailed recall experiment stats",
+      "advanced": true
+    },
+    "extractionWindowMessages": {
+      "label": "Extraction Window Messages",
+      "placeholder": "30",
+      "help": "How many recent messages standard full extraction inspects",
+      "advanced": true
+    },
+    "extractionWindowChars": {
+      "label": "Extraction Window Chars",
+      "placeholder": "8000",
+      "help": "Character cap for standard full extraction window",
+      "advanced": true
+    },
+    "extractionPressureWindowMessages": {
+      "label": "Pressure Extraction Messages",
+      "placeholder": "50",
+      "help": "How many recent messages pressure-triggered extraction inspects",
+      "advanced": true
+    },
+    "extractionPressureWindowChars": {
+      "label": "Pressure Extraction Chars",
+      "placeholder": "16000",
+      "help": "Character cap for pressure-triggered extraction window",
+      "advanced": true
     }
   },
   "configSchema": {
@@ -87,7 +140,17 @@
       "dbPath": { "type": "string" },
       "searchThreshold": { "type": "number" },
       "topK": { "type": "number" },
-      "customInstructions": { "type": "string" }
+      "customInstructions": { "type": "string" },
+      "agentAliases": { "type": "object", "additionalProperties": { "type": "string" } },
+      "recallMaxResults": { "type": "number" },
+      "recallScoreGap": { "type": "number" },
+      "recallHighConfidence": { "type": "number" },
+      "recallShortMsgMaxResults": { "type": "number" },
+      "recallStatsLog": { "type": "boolean" },
+      "extractionWindowMessages": { "type": "number" },
+      "extractionWindowChars": { "type": "number" },
+      "extractionPressureWindowMessages": { "type": "number" },
+      "extractionPressureWindowChars": { "type": "number" }
     },
     "required": []
   }
