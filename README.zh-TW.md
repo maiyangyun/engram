@@ -250,6 +250,22 @@ Engram 是 **Cortex** 旗下三個產品之一——讓 AI agent 成為真正有
 
 ## 更新日誌
 
+### v0.4.1 (2026-04-21)
+
+**修復：**
+- **Embedding 佇列繞行** — `embed()` 與 `embedBatch()` 不再經過全域 Ollama 串行佇列。像 `bge-m3` 這類 BERT 型 embedding 模型原生支援並發，對它們做串行化會在多 Agent 場景下引發 `autoRecall` 逾時
+- **僅在 runtime 註冊 hooks** — Engram hooks 現在只在 runtime plugin load 路徑註冊。gateway 啟動階段不再綁定 `before_prompt_build` / capture hooks，消除 gateway boot + runtime registry 雙重載入帶來的重複 hook 風險
+- **Recall 時序診斷** — 新增 `embed/search/total` 細粒度耗時日誌，讓 recall 卡頓與逾時來源可直接從生產日誌定位
+
+**運維效果：**
+- 修復一類核心故障：飛書 / 私聊訊息雖然已收件並完成 dispatch，但因 recall 卡在 prompt build 前而無法進入回發
+- 提升多個 Agent 共用同一 OpenClaw 進程、同一 Ollama 後端時的 recall 穩定性
+
+**相容性：**
+- 無 schema 變更
+- 無可見性模型變更
+- 相對 v0.4.0 無破壞性變更
+
 ### v0.4.0 (2026-04-13)
 
 **v2 可見性模型（破壞性變更）：**

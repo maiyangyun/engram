@@ -295,7 +295,10 @@ export function registerAutoRecall(deps: HookDeps): void {
     }
 
     const recallWork = async (): Promise<{ prependContext: string } | undefined> => {
+      const t0 = Date.now();
       const embedding = await deps.embedder.embed(cleanPrompt);
+      const t1 = Date.now();
+      deps.api.logger.info(`engram: [recall-timing] embed=${t1 - t0}ms`);
 
       let results: SearchResult[];
 
@@ -340,6 +343,8 @@ export function registerAutoRecall(deps: HookDeps): void {
 
       // v0.4: Touch recalled memories to reset their decay clock
       deps.store.touchRecalled(results.map((r) => r.id));
+      const t2 = Date.now();
+      deps.api.logger.info(`engram: [recall-timing] embed=${t1 - t0}ms search=${t2 - t1}ms total=${t2 - t0}ms results=${results.length}`);
 
       deps.api.logger.info(`engram: injecting ${results.length} memories into context`);
 

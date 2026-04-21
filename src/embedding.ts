@@ -1,7 +1,9 @@
 // Engram Embedding Layer — Ollama-based embedding provider
-// v0.4: All requests routed through global Ollama queue to prevent model thrashing
-
-import { ollamaEnqueue } from "./ollama-queue.js";
+// v0.4.1: Embedding requests bypass Ollama serial queue.
+// BERT-based embedding models (bge-m3) handle concurrent requests natively.
+// The serial queue was designed for LLM inference model-swap prevention,
+// but embedding models don't swap — so queueing only causes recall timeouts
+// when multiple agents share the same process.
 
 export interface EmbeddingProvider {
   embed(text: string): Promise<number[]>;
@@ -25,12 +27,14 @@ export class OllamaEmbeddingProvider implements EmbeddingProvider {
   }
 
   async embed(text: string): Promise<number[]> {
-    return ollamaEnqueue(async (signal) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30_000);
+    try {
       const resp = await fetch(`${this.baseUrl}/api/embed`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ model: this.model, input: text }),
-        signal,
+        signal: controller.signal,
       });
 
       if (!resp.ok) {
@@ -44,16 +48,20 @@ export class OllamaEmbeddingProvider implements EmbeddingProvider {
 
       if (this._dimensions === null) this._dimensions = embedding.length;
       return embedding;
-    }, { timeoutMs: 30_000 });
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async embedBatch(texts: string[]): Promise<number[][]> {
-    return ollamaEnqueue(async (signal) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 60_000);
+    try {
       const resp = await fetch(`${this.baseUrl}/api/embed`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ model: this.model, input: texts }),
-        signal,
+        signal: controller.signal,
       });
 
       if (!resp.ok) {
@@ -66,7 +74,9 @@ export class OllamaEmbeddingProvider implements EmbeddingProvider {
         this._dimensions = data.embeddings[0].length;
       }
       return data.embeddings;
-    }, { timeoutMs: 60_000 });
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   dimensions(): number {

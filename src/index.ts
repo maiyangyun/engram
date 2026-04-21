@@ -1,6 +1,7 @@
 // Engram — Enterprise-grade multi-agent collaborative memory system
 // OpenClaw plugin entry point
 
+// @ts-ignore - runtime module is provided by OpenClaw SDK during plugin execution
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { parseConfig, resolveDbPath } from "./config.js";
 import { EngramStore } from "./store.js";
@@ -15,6 +16,10 @@ import {
   createMemoryDeleteTool,
 } from "./tools.js";
 import { registerAutoRecall, registerAutoCapture } from "./hooks.js";
+
+// Module-level boot state — resets on module re-evaluation (gateway restart)
+// NOTE: NOT reliable if Node ESM cache persists across restarts
+// Actual dedup uses api instance marker below
 
 const engramConfigSchema = {
   safeParse(value: unknown) {
@@ -67,7 +72,12 @@ const engramPlugin = definePluginEntry({
   name: "Engram Memory",
   description: "Enterprise-grade multi-agent collaborative memory system with five-dimensional ownership",
   configSchema: engramConfigSchema,
-  register(api) {
+  register(api: any) {
+    const fullStack = new Error().stack ?? "";
+    const stack = fullStack.split("\n").slice(1, 5).map((s) => s.trim()).join(" | ") || "no-stack";
+    const isGatewayPluginLoad = fullStack.includes("loadGatewayPlugins");
+    const isRuntimePluginLoad = fullStack.includes("ensureRuntimePluginsLoaded") || fullStack.includes("resolveRuntimePluginRegistry");
+    api.logger.info(`engram: register called mode=${api.registrationMode} source=${api.source} root=${api.rootDir ?? "-"} gatewayLoad=${isGatewayPluginLoad} runtimeLoad=${isRuntimePluginLoad} stack=${stack}`);
     const cfg = parseConfig(api.pluginConfig as Record<string, unknown>);
     const dbPath = resolveDbPath(cfg.dbPath);
 
@@ -104,14 +114,23 @@ const engramPlugin = definePluginEntry({
     // Register hooks
     const hookDeps = { api: api as unknown as Parameters<typeof registerAutoRecall>[0]["api"], store, embedder, llm, config: cfg };
 
-    if (cfg.autoRecall) {
-      registerAutoRecall(hookDeps);
-      api.logger.info("engram: autoRecall enabled");
-    }
+    // Register hooks only on runtime plugin load.
+    // OpenClaw loads plugins twice: gateway boot and runtime plugin registry.
+    // Hooks are global, so registering them in both paths causes duplicate recall/capture.
+    // Tools/services can exist on both paths, but hooks must only bind once on runtime load.
+    const shouldRegisterHooks = isRuntimePluginLoad || !isGatewayPluginLoad;
+    if (shouldRegisterHooks) {
+      if (cfg.autoRecall) {
+        registerAutoRecall(hookDeps);
+        api.logger.info("engram: autoRecall enabled");
+      }
 
-    if (cfg.autoCapture) {
-      registerAutoCapture(hookDeps);
-      api.logger.info("engram: autoCapture enabled");
+      if (cfg.autoCapture) {
+        registerAutoCapture(hookDeps);
+        api.logger.info("engram: autoCapture enabled");
+      }
+    } else {
+      api.logger.info("engram: skipping hook registration during gateway plugin load");
     }
 
     // Register background service

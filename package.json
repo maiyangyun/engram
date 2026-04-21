@@ -1,6 +1,6 @@
 {
   "name": "@cortex/engram",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "type": "module",
   "description": "Enterprise-grade multi-agent collaborative memory system for OpenClaw",
   "license": "MIT",
@@ -19,7 +19,7 @@
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
-    "test": "vitest run",
+    "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },
@@ -35,7 +35,9 @@
     "vitest": "^4.0.18"
   },
   "openclaw": {
-    "extensions": ["./dist/index.js"],
+    "extensions": [
+      "./dist/index.js"
+    ],
     "compat": {
       "pluginApi": ">=2026.3.24-beta.2",
       "minGatewayVersion": "2026.3.24-beta.2"

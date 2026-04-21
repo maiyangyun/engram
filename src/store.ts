@@ -182,6 +182,7 @@ export class EngramStore {
       metadata: input.metadata ?? null,
       created_at: now,
       updated_at: now,
+      last_recalled_at: null,
       dedupAction: "added",
     };
   }

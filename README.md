@@ -256,6 +256,22 @@ Engram is one of three products under the **Cortex** umbrella — tools for maki
 
 ## Changelog
 
+### v0.4.1 (2026-04-21)
+
+**Fixes:**
+- **Embedding queue bypass** — `embed()` and `embedBatch()` no longer go through the global Ollama serial queue. BERT-style embedding models such as `bge-m3` can handle concurrent requests natively, and queueing them caused `autoRecall` timeouts under multi-agent load
+- **Runtime-only hook registration** — Engram hooks now register only in the runtime plugin load path. Gateway startup no longer binds `before_prompt_build` / capture hooks, eliminating duplicate hook registration risk across gateway boot + runtime registry load
+- **Recall timing diagnostics** — added granular `embed/search/total` timing logs to make recall stalls and timeout sources directly observable in production logs
+
+**Operational impact:**
+- Fixes the main failure mode where Feishu / DM conversations could be received and dispatched but never reach reply sending because recall got stuck before prompt build completed
+- Improves recall stability when multiple agents share the same OpenClaw process and the same Ollama backend
+
+**Compatibility:**
+- No schema changes
+- No visibility-model changes
+- No breaking changes from v0.4.0
+
 ### v0.4.0 (2026-04-13)
 
 **v2 Visibility Model (breaking):**
