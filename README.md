@@ -1,32 +1,64 @@
-[English](README.md) | [繁體中文](README.zh-TW.md)
+[English](README.md) | [繁體中文](README.zh-TW.md) | [简体中文](README.zh-CN.md)
 
 # Engram 🧠
 
-**Give your AI agents memory. Real memory.**
+**Your AI agents forget everything after each conversation. Engram fixes that.**
 
-Engram is a collaborative memory system that lets multiple AI agents remember, learn, and share knowledge — all running locally on your machine. No cloud APIs. No data leaving your network. Just SQLite, Ollama, and a simple plugin.
+Engram gives your [OpenClaw](https://github.com/openclaw/openclaw) agents persistent memory — they remember what you've told them, what they've decided, and what they've learned, across every session and every channel. Multiple agents can even share knowledge with each other, automatically.
 
-Built for [OpenClaw](https://github.com/openclaw/openclaw). Part of the [Cortex](https://github.com/maiyangyun/engram#part-of-cortex) family.
+Everything runs locally on your machine. No cloud APIs. No data leaving your network. Part of the [Cortex](https://github.com/maiyangyun/engram#part-of-cortex) family.
 
 ---
 
-## What Can Engram Do?
+## The Problem
 
-**For a single agent:**
-- Automatically remember what users tell you and what you decide
-- Recall relevant memories before every response — no manual lookup needed
-- Build up expertise over time, across conversations, across channels
+AI agents are goldfish. Every conversation starts from zero.
 
-**For multiple agents:**
-- Share a single memory database across all your agents
-- Each agent has private memories invisible to others
-- Shared memories flow automatically to everyone who needs them
-- One agent learns something? Others can benefit immediately
+You tell your agent you prefer PostgreSQL over MySQL. Next session, it suggests MySQL. You spend twenty minutes walking an agent through your deployment process. Tomorrow, it has no idea how you deploy. You make a critical architecture decision together — the reasoning, the tradeoffs, the conclusion — all gone the moment the conversation ends.
 
-**For you (the human):**
-- Your agents stop asking the same questions twice
-- Project decisions persist across sessions
-- Switch channels (webchat → Feishu → Telegram) without losing context
+It gets worse with multiple agents. You have three agents working on different parts of your project. One of them learns something important — say, that the staging server moved to a new IP. The other two? Clueless. You end up being the messenger between your own agents, repeating yourself over and over.
+
+This isn't a minor inconvenience. It fundamentally limits what agents can do. Without memory, every agent is a perpetual beginner.
+
+---
+
+## What Engram Does
+
+Engram runs quietly in the background and handles memory for you:
+
+- **Agents remember.** Preferences, decisions, project context, technical details — once discussed, it sticks. Your agent builds up real expertise over time.
+- **Agents share.** When one agent learns something, others in the same organization can access it too. No manual copying, no repeated explanations.
+- **Your data stays yours.** Everything is stored in a local SQLite database. Embeddings run through Ollama on your machine. Nothing leaves your network unless you explicitly choose a cloud model.
+- **Works everywhere.** Webchat, Feishu, Telegram, Discord — switch channels freely. Your agent's memory follows.
+
+---
+
+## See It In Action
+
+**Without Engram:**
+> **You:** Use PostgreSQL for this project, not MySQL.
+> **Agent:** Got it, I'll use PostgreSQL.
+>
+> *(next session)*
+>
+> **You:** Set up the database.
+> **Agent:** Sure! Which database would you prefer — MySQL, PostgreSQL, or SQLite?
+
+**With Engram:**
+> **You:** Set up the database.
+> **Agent:** Setting up PostgreSQL, since that's your preference. Want me to use the same schema pattern from the Bonbon project?
+
+---
+
+**Without Engram:**
+> **Agent A** *(learns):* The team decided to deploy via GitHub Actions, not manual SSH.
+>
+> *(later, different agent)*
+>
+> **Agent B:** How should I deploy this? Want me to SSH into the server?
+
+**With Engram:**
+> **Agent B:** I'll set up the GitHub Actions workflow — that's the deployment approach the team settled on.
 
 ---
 
@@ -86,28 +118,13 @@ That's it. Your agents now have memory.
 
 ## How It Works
 
-```
-User speaks → autoRecall searches memories → injects relevant context
-                                ↓
-                          Agent responds
-                                ↓
-                    autoCapture fires (agent_end hook)
-                                ↓
-              ┌─────────────────┴─────────────────┐
-              │ short (<500 chars)                 │ long (≥500 chars)
-              │ embed directly → store             │ LLM extracts facts → embed → store
-              └───────────────────────────────────┘
-                                ↓
-                     SQLite (WAL mode, crash-safe)
-```
+Engram hooks into two moments of every conversation:
 
-### What Gets Remembered
+**Before your agent responds** — Engram takes your message, searches its memory database for anything relevant, and quietly injects matching memories into the agent's context. Your agent sees them as background knowledge, like recalling something it already knows.
 
-Engram captures both sides of the conversation:
-- **What users say** — preferences, facts, requests, context
-- **What agents decide** — analysis, recommendations, commitments, plans
+**After your agent responds** — Engram looks at what just happened in the conversation and extracts important facts. Short exchanges (under 500 characters) get stored directly. Longer conversations go through an LLM that reads the full exchange and picks out the key points — preferences stated, decisions made, facts established.
 
-Each memory is tagged with a `source_role` (`user`, `assistant`, or `both`) so you always know where knowledge came from.
+Everything is stored locally in SQLite (WAL mode, crash-safe). Embeddings are generated by Ollama running on your machine, so memory search is fast and private.
 
 ### Memory Types
 
@@ -117,34 +134,27 @@ Each memory is tagged with a `source_role` (`user`, `assistant`, or `both`) so y
 | `episodic` | Events, incidents, time-bound things | "Deployed v2.1 on 2026-04-09" |
 | `procedural` | Processes, decisions, how-to knowledge | "Always run migrations before deploying" |
 
+### What Gets Remembered
+
+Engram captures both sides of the conversation:
+- **What you say** — preferences, facts, requests, context
+- **What your agent decides** — analysis, recommendations, commitments, plans
+
+Each memory is tagged with a `source_role` (`user`, `assistant`, or `both`) so you always know where knowledge came from.
+
 ---
 
 ## Multi-Agent Memory
 
-This is where Engram gets interesting.
+This is where Engram really shines.
 
-### Isolation
+By default, each agent's memories are private. Agent A can't see what Agent B remembers, and vice versa. This happens automatically — Engram reads the agent identity from the session.
 
-Every memory has an `agent_id` — always. Agent A’s memories are invisible to Agent B by default. This happens automatically — Engram reads the agent identity from the session key.
+But sometimes you want agents to share. Maybe Agent A figured out your deployment process, and you want Agent B to know it too. Maybe your whole team of agents should understand the project architecture.
 
-### Visibility Model (v2)
+Engram handles this through organizations and projects. When an agent stores a memory with an org or project tag, other agents in that same org or project can see it. Think of it like team channels — private by default, shared when it makes sense.
 
-Sharing is controlled by **org/project dimensions**, not by clearing `agent_id`. Every memory always has a creator (`agent_id` is never null). Visibility expands upward through dimensions:
-
-- **Has `project_id` + `org_id`** → visible to all agents that are members of that project
-- **Has `org_id` only** → visible to all agents in that organization
-- **Neither** → visible only to the creating agent
-
-Agents belong to at least one organization (default: `home`). Projects belong to organizations.
-
-**Manual sharing:** Use `visibility: "shared"` to attach the agent’s default org (making it org-wide visible):
-```
-memory_add(text="Project deadline is March 15", visibility="shared")
-```
-
-**Automatic:** Engram’s LLM extraction automatically infers org/project dimensions from conversation context. Configure known dimensions in `~/.engram/dimensions.json` to guide inference (see [Dimension Configuration](#dimension-configuration)). New orgs/projects discovered by the LLM are auto-registered in `dimensions.json`.
-
-**Backward compatibility:** Legacy records with `agent_id=NULL` (from pre-v0.4) are still visible to all agents, preserving existing shared memories.
+The best part: you usually don't have to do this manually. Engram's extraction LLM automatically figures out which org or project a conversation belongs to and tags memories accordingly. You just configure your known orgs and projects once, and Engram handles the rest.
 
 ### Four-Dimensional Ownership
 
@@ -160,6 +170,86 @@ Every memory carries four parallel ownership dimensions:
 These dimensions are **parallel, not hierarchical**. A search matches memories where all specified dimensions align — unspecified dimensions are treated as wildcards.
 
 For example, searching with `orgId="pumpkin-global"` returns all memories in that org regardless of project. Adding `projectId="engram"` narrows it further. Memories without org/project dimensions are private to the creating agent.
+
+### Visibility Rules
+
+- **Has `project_id` + `org_id`** → visible to all agents in that project
+- **Has `org_id` only** → visible to all agents in that organization
+- **Neither** → visible only to the creating agent
+
+To manually share a memory:
+```
+memory_add(text="Project deadline is March 15", visibility="shared")
+```
+
+---
+
+## Configuration
+
+These are the defaults. Most users won't need to change anything.
+
+### Plugin Config (openclaw.json)
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `userId` | `"default"` | Root user ID for scoping |
+| `defaultOrgId` | `null` | Default organization |
+| `defaultProjectId` | `null` | Default project |
+| `autoCapture` | `true` | Auto-extract memories from conversations |
+| `autoRecall` | `true` | Auto-inject memories into context |
+| `embeddingModel` | `ollama/bge-m3` | Embedding model |
+| `extractionModel` | `ollama/qwen3.5:9b` | LLM for fact extraction |
+| `ollamaBaseUrl` | `http://localhost:11434` | Ollama API endpoint |
+| `dbPath` | `~/.engram/engram.db` | SQLite database path |
+| `searchThreshold` | `0.5` | Minimum similarity score (0-1) |
+| `topK` | `10` | Max memories per search |
+| `recallMaxResults` | `8` | Hard cap on injected recall memories |
+| `recallScoreGap` | `0.08` | Truncate recalled memories when adjacent score gap is large |
+| `recallHighConfidence` | `0.75` | High-confidence recall threshold |
+| `recallShortMsgMaxResults` | `3` | Max recalled memories for short prompts (<20 chars) |
+| `recallStatsLog` | `true` | Log recall experiment stats |
+| `extractionWindowMessages` | `30` | Standard full extraction inspects the latest N messages |
+| `extractionWindowChars` | `8000` | Character cap for standard full extraction window |
+| `extractionPressureWindowMessages` | `50` | Pressure-triggered extraction inspects the latest N messages |
+| `extractionPressureWindowChars` | `16000` | Character cap for pressure-triggered extraction window |
+
+### Advanced Configuration
+
+#### Extraction Window Tuning
+
+Engram uses two extraction windows for `autoCapture` full extraction:
+
+- **Standard full extraction** — used for normal longer conversations
+- **Pressure-triggered extraction** — used when context pressure is high and Engram proactively captures before compaction risk grows
+
+Defaults:
+
+```json
+{
+  "extractionWindowMessages": 30,
+  "extractionWindowChars": 8000,
+  "extractionPressureWindowMessages": 50,
+  "extractionPressureWindowChars": 16000
+}
+```
+
+Raising these values improves capture completeness for long planning threads, at the cost of more extraction tokens and slightly slower capture.
+
+#### Dimension Configuration (~/.engram/dimensions.json)
+
+```json
+{
+  "knownOrgs": [
+    { "id": "pumpkin-global", "aliases": ["pumpkin", "PGL"] }
+  ],
+  "knownProjects": [
+    { "id": "engram", "aliases": ["memory system"] },
+    { "id": "bonbon", "aliases": ["dating app"] }
+  ]
+}
+```
+
+The LLM uses these known dimensions to automatically infer `org_id` and `project_id` during memory extraction. No manual tagging needed — just configure your orgs and projects once, and Engram figures out where each memory belongs. New dimensions discovered by the LLM are auto-registered here.
 
 ---
 
@@ -192,71 +282,6 @@ Engram registers six tools, compatible with the OpenClaw memory interface:
 
 ---
 
-## Configuration
-
-### Plugin Config (openclaw.json)
-
-| Field | Default | Description |
-|-------|---------|-------------|
-| `userId` | `"default"` | Root user ID for scoping |
-| `defaultOrgId` | `null` | Default organization |
-| `defaultProjectId` | `null` | Default project |
-| `autoCapture` | `true` | Auto-extract memories from conversations |
-| `autoRecall` | `true` | Auto-inject memories into context |
-| `embeddingModel` | `ollama/bge-m3` | Embedding model |
-| `extractionModel` | `ollama/qwen3.5:9b` | LLM for fact extraction |
-| `ollamaBaseUrl` | `http://localhost:11434` | Ollama API endpoint |
-| `dbPath` | `~/.engram/engram.db` | SQLite database path |
-| `searchThreshold` | `0.5` | Minimum similarity score (0-1) |
-| `topK` | `10` | Max memories per search |
-| `recallMaxResults` | `8` | Hard cap on injected recall memories |
-| `recallScoreGap` | `0.08` | Truncate recalled memories when adjacent score gap is large |
-| `recallHighConfidence` | `0.75` | High-confidence recall threshold |
-| `recallShortMsgMaxResults` | `3` | Max recalled memories for short prompts (<20 chars) |
-| `recallStatsLog` | `true` | Log recall experiment stats |
-| `extractionWindowMessages` | `30` | Standard full extraction inspects the latest N messages |
-| `extractionWindowChars` | `8000` | Character cap for standard full extraction window |
-| `extractionPressureWindowMessages` | `50` | Pressure-triggered extraction inspects the latest N messages |
-| `extractionPressureWindowChars` | `16000` | Character cap for pressure-triggered extraction window |
-
-### Extraction Window Tuning
-
-Engram uses two extraction windows for `autoCapture` full extraction:
-
-- **Standard full extraction** — used for normal longer conversations
-- **Pressure-triggered extraction** — used when context pressure is high and Engram proactively captures before compaction risk grows
-
-Defaults:
-
-```json
-{
-  "extractionWindowMessages": 30,
-  "extractionWindowChars": 8000,
-  "extractionPressureWindowMessages": 50,
-  "extractionPressureWindowChars": 16000
-}
-```
-
-This replaces the old fixed behavior that only inspected a much narrower recent slice. Raising these values improves capture completeness for long planning threads, at the cost of more extraction tokens and slightly slower capture.
-
-### Dimension Configuration (~/.engram/dimensions.json)
-
-```json
-{
-  "knownOrgs": [
-    { "id": "pumpkin-global", "aliases": ["pumpkin", "PGL"] }
-  ],
-  "knownProjects": [
-    { "id": "engram", "aliases": ["memory system"] },
-    { "id": "bonbon", "aliases": ["dating app"] }
-  ]
-}
-```
-
-The LLM uses these known dimensions to automatically infer `org_id` and `project_id` during memory extraction. No manual tagging needed — just configure your orgs and projects once, and Engram figures out where each memory belongs. New dimensions discovered by the LLM are auto-registered here.
-
----
-
 ## Tech Stack
 
 - **Storage:** SQLite with WAL mode (crash-safe, concurrent reads)
@@ -285,136 +310,18 @@ Engram is one of three products under the **Cortex** umbrella — tools for maki
 
 ## Changelog
 
-### v0.5.0-beta.1 (2026-04-22)
+**v0.5.0-beta.1** (2026-04-22) — Recall precision overhaul with smart truncation, incremental memory deduplication with human review, agent alias mapping, and configurable extraction windows.
 
-**Recall Precision (P0-1):**
-- Raised `searchThreshold` from 0.50 to 0.62 based on baseline analysis of 1922 memories × 50 simulated queries
-- New `applySmartTruncation()` — score gap truncation (0.08), hard cap (8), short-message limit (3), high-confidence filter (0.75)
-- Six new tunable recall parameters: `recallMaxResults`, `recallScoreGap`, `recallHighConfidence`, `recallShortMsgMaxResults`, `recallStatsLog`
-- Added `[recall-stats]` experiment logging for production observation
-
-**Memory Deduplication (P0-2):**
-- Incremental dedup: two-tier thresholds (cross-dimension 0.92, same-dimension 0.88)
-- Gray zone (0.85-0.92) written to `pending_dedup` table for human review
-- New `engram_dedup_review` tool (list / resolve) for interactive dedup confirmation
-- Input normalization: `org_id`/`project_id` now `toLowerCase().trim()` at entry
-
-**Agent Alias Mapping (P0-3):**
-- New `agentAliases` config for automatic agent ID mapping (e.g. `"main"` → `"ben"`)
-- Ensures consistent `agent_id` across sessions without manual data migration
-
-**Extraction Window (P1-4):**
-- Replaced fixed narrow extraction window (20 messages / 4000 chars) with configurable adaptive windows
-- Standard full extraction: default 30 messages / 8000 chars
-- Pressure-triggered extraction: default 50 messages / 16000 chars
-- Four new config parameters: `extractionWindowMessages`, `extractionWindowChars`, `extractionPressureWindowMessages`, `extractionPressureWindowChars`
-
-**Compatibility:**
-- No schema breaking changes from v0.4.1
-- All new config parameters have sensible defaults — zero-config upgrade
-
-### v0.4.1 (2026-04-21)
-
-**Fixes:**
-- **Embedding queue bypass** — `embed()` and `embedBatch()` no longer go through the global Ollama serial queue. BERT-style embedding models such as `bge-m3` can handle concurrent requests natively, and queueing them caused `autoRecall` timeouts under multi-agent load
-- **Runtime-only hook registration** — Engram hooks now register only in the runtime plugin load path. Gateway startup no longer binds `before_prompt_build` / capture hooks, eliminating duplicate hook registration risk across gateway boot + runtime registry load
-- **Recall timing diagnostics** — added granular `embed/search/total` timing logs to make recall stalls and timeout sources directly observable in production logs
-
-**Operational impact:**
-- Fixes the main failure mode where Feishu / DM conversations could be received and dispatched but never reach reply sending because recall got stuck before prompt build completed
-- Improves recall stability when multiple agents share the same OpenClaw process and the same Ollama backend
-
-**Compatibility:**
-- No schema changes
-- No visibility-model changes
-- No breaking changes from v0.4.0
-
-### v0.4.0 (2026-04-13)
-
-**v2 Visibility Model (breaking):**
-- `agent_id` is now **always set** — every memory has an explicit creator. Sharing no longer works by setting `agent_id=null`
-- Visibility expands through `org_id`/`project_id` dimensions: project+org → project members; org only → org members; neither → agent-private
-- Agents belong to at least one organization (default: `home`); projects belong to organizations
-- Backward compatible with legacy `agent_id=NULL` records from earlier versions
-
-**New Features:**
-- **Memory decay** — `last_recalled_at` tracking with time-weighted scoring (`DECAY_RATE=0.03`, `DECAY_FLOOR=0.1`). Frequently recalled memories stay relevant; forgotten ones fade
-- **Noise filtering** — skips greetings, system mechanism chatter, and trivial replies during capture
-- **Ollama global queue** — serializes all Ollama requests through a single queue, preventing model-switching thrash
-- **Gemini API provider** — cloud-based extraction alternative to local Ollama
-- **dimensions.json auto-discovery** — new orgs/projects found by LLM extraction are automatically registered
-- **Context pressure tracking** — proactively triggers full capture under high context load
-- **Emergency capture** — SIGTERM/SIGUSR1/SIGUSR2 signals save pending memories synchronously
-- **Capture queue** — serialized with independent timeouts, isolated from main conversation abort signals
-- **Fast-path keyword dimension inference** — infers org/project from keywords without LLM calls
-- **Salvage capture** — preserves content when LLM or embedding fails
-
-**Improvements:**
-- Embedding model upgraded to `bge-m3` — significantly better Chinese search quality
-- `searchWithVisibility` rewritten for v2 visibility model
-- Extraction prompt: language preservation + agent membership injection for better dimension inference
-- Configurable search threshold (default 0.5, removed hardcoded 0.6 floor)
-
-**Breaking Changes:**
-- `agent_id` is never null in new records. Shared visibility is determined by `org_id`/`project_id` presence
-- `searchWithVisibility()` rewritten for v2 dimension-based visibility
-
-### v0.3 (2026-04-11)
-
-**New Features:**
-- **Four-dimensional ownership** — memories now carry `user_id`, `agent_id`, `org_id`, `project_id` with parallel dimension matching (replaces the old five-layer visibility hierarchy)
-- **Automatic dimension inference** — LLM extracts org/project dimensions from conversation context using configurable known dimensions (`dimensions.json`)
-- **Memory deduplication** — cosine similarity threshold (0.92) detects near-duplicate memories and updates existing ones instead of inserting duplicates. `memory_add` returns `dedupAction: "added" | "updated"`
-- **Context pressure capture** — proactively triggers full memory extraction when conversation grows long (30+ messages or 80K+ characters), preventing data loss from context overflow
-
-**Resilience (crash/failure protection):**
-- **Failed turn salvage** — `success=false` turns no longer skip capture; a fast-path salvage preserves the last 6 messages
-- **LLM failure fallback** — if extraction or embedding fails (timeout/abort), automatically degrades to fast-path capture instead of losing data
-- **Emergency signal capture** — SIGTERM/SIGUSR1/SIGUSR2 triggers synchronous SQLite write of pending capture data (no embedding, but content is preserved)
-- **Capture queue serialization** — all captures run through a serial queue with independent 60s timeouts, isolated from main conversation abort signals
-
-**Improvements:**
-- Extraction model upgraded to `qwen3.5:9b` (better multilingual support)
-- Extraction prompt rewritten with language-following rule at highest priority (Chinese conversations produce Chinese memories)
-- Search threshold respects config value (default 0.5) instead of hardcoded 0.6 floor — fixes poor Chinese recall
-- Fast-path captures include lightweight keyword matching for shared detection (`inferSharedFromKeywords`)
-- Parallel dimension search via single SQL query (replaces sequential five-layer scan)
-
-**Breaking Changes:**
-- `shared-rules.json` keyword-based sharing replaced by `dimensions.json` with `knownOrgs`/`knownProjects` — LLM handles dimension assignment automatically
-- `searchWithVisibility()` API changed: flat dimension filter instead of layer-based hierarchy
-- `store.add()` now returns `AddMemoryResult` with `dedupAction` field
-
-### v0.2 (2026-04-10)
-
-**New Features:**
-- **Bidirectional autoCapture** — now remembers both user input AND agent responses (decisions, analysis, recommendations). Each memory tagged with `source_role: user|assistant|both`
-- **Multi-agent support** — multiple agents share one database with automatic identity isolation via session keys
-- **Shared memory** — `visibility: "shared"` parameter on `memory_add`, plus keyword-based auto-promotion via `shared-rules.json`
-
-**Improvements:**
-- autoRecall timeout increased from 8s to 15s (handles Ollama cold starts)
-- Fast-capture threshold raised from 200 to 500 characters (reduces unnecessary LLM calls)
-- Plugin config schema declared for OpenClaw UI compatibility
-
-### v0.1 (2026-04-09)
-
-- Initial release
-- Five-dimensional ownership, five-layer visibility, three memory types
-- autoCapture + autoRecall pipelines
-- SQLite WAL storage, Ollama embeddings + extraction
-- Cross-channel memory (webchat, Feishu, etc.)
+See [CHANGELOG.md](CHANGELOG.md) for full version history.
 
 ---
 
 ## Roadmap
 
-- [x] Project-scoped sharing (shared within a project, not globally) ✅
-- [x] Memory deduplication ✅
-- [x] Multilingual extraction ✅
-- [ ] Embedding cache for faster recall under concurrency
-- [x] Memory importance decay over time ✅
-- [ ] Web dashboard for memory inspection
+- [ ] Recall timeout optimization under multi-agent concurrency
+- [ ] Evaluate cloud extraction providers (Gemini API) for faster capture
+- [ ] Web dashboard for memory inspection and management
+- [ ] Memory abstraction — auto-distill specific experiences into transferable methodology
 
 ---
 
