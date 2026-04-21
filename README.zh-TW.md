@@ -259,15 +259,13 @@ Engram 是 **Cortex** 旗下三個產品之一——讓 AI agent 成為真正有
 - 新增 `[recall-stats]` 實驗日誌
 
 **記憶去重 (P0-2)：**
-- 存量清洗：1950 → 1788 條（清理 162 條重複）
 - 增量防護：雙層閾值（跨維度 0.92、同維度 0.88）
 - 灰色地帶 (0.85-0.92) 寫入 `pending_dedup` 表，新增 `engram_dedup_review` 工具
 - 輸入歸一化：`org_id`/`project_id` 入口 `toLowerCase().trim()`
 
-**髒數據清理 (P0-3)：**
-- 將所有 `agent_id=NULL` 和 `agent_id='main'` 記錄遷移至正確的 agent 名稱
-- 歸一化 `org_id` 變體（如 `cortex-team` → `cortex`）
-- 新增 `agentAliases` 配置項
+**Agent 別名映射 (P0-3)：**
+- 新增 `agentAliases` 配置項，支援自動 agent ID 映射（如 `"main"` → `"ben"`）
+- 確保跨 session 的 `agent_id` 一致性，無需手動資料遷移
 
 **Extraction 窗口優化 (P1-4)：**
 - 將固定窄窗口（20 條 / 4000 字元）替換為可配置自適應窗口

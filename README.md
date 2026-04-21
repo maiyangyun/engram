@@ -294,17 +294,14 @@ Engram is one of three products under the **Cortex** umbrella — tools for maki
 - Added `[recall-stats]` experiment logging for production observation
 
 **Memory Deduplication (P0-2):**
-- Bulk cleanup: 1950 → 1788 memories (162 duplicates removed)
-  - 25 exact duplicates deleted, 57 high-similarity (0.95+) auto-merged, 86 confirmed merges (0.90-0.95)
 - Incremental dedup: two-tier thresholds (cross-dimension 0.92, same-dimension 0.88)
 - Gray zone (0.85-0.92) written to `pending_dedup` table for human review
 - New `engram_dedup_review` tool (list / resolve) for interactive dedup confirmation
 - Input normalization: `org_id`/`project_id` now `toLowerCase().trim()` at entry
 
-**Data Cleanup (P0-3):**
-- Migrated all `agent_id=NULL` and `agent_id='main'` records to proper agent names
-- Normalized `org_id` variants (e.g. `cortex-team` → `cortex`, `bonbon-team` → `bonbon`)
-- New `agentAliases` config for automatic agent ID mapping (e.g. `main` → `ben`)
+**Agent Alias Mapping (P0-3):**
+- New `agentAliases` config for automatic agent ID mapping (e.g. `"main"` → `"ben"`)
+- Ensures consistent `agent_id` across sessions without manual data migration
 
 **Extraction Window (P1-4):**
 - Replaced fixed narrow extraction window (20 messages / 4000 chars) with configurable adaptive windows
