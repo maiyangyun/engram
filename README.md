@@ -70,7 +70,7 @@ Engram runs quietly in the background and handles memory for you:
 
 **With Engram:**
 > **You:** Set up the database.
-> **Agent:** Setting up PostgreSQL, since that's your preference. Want me to use the same schema pattern from the Bonbon project?
+> **Agent:** Setting up PostgreSQL, since that's your preference. Want me to use the same schema pattern from the last project?
 
 ---
 
@@ -188,12 +188,12 @@ Every memory carries four parallel ownership dimensions:
 |-----------|-------------------|--------|
 | `user_id` | The human identity — personal info shared across all agents | `"soren"` |
 | `agent_id` | The agent that created the memory (always set, never null) | `"main"`, `"lion"` |
-| `org_id` | Organization scope — expands visibility to org members | `"pumpkin-global"` |
+| `org_id` | Organization scope — expands visibility to org members | `"cortex"` |
 | `project_id` | Project scope — expands visibility to project members | `"engram"`, `"imprint"` |
 
 These dimensions are **parallel, not hierarchical**. A search matches memories where all specified dimensions align — unspecified dimensions are treated as wildcards.
 
-For example, searching with `orgId="pumpkin-global"` returns all memories in that org regardless of project. Adding `projectId="engram"` narrows it further. Memories without org/project dimensions are private to the creating agent.
+For example, searching with `orgId="cortex"` returns all memories in that org regardless of project. Adding `projectId="engram"` narrows it further. Memories without org/project dimensions are private to the creating agent.
 
 ### Visibility Rules
 
@@ -264,7 +264,7 @@ Raising these values improves capture completeness for long planning threads, at
 ```json
 {
   "knownOrgs": [
-    { "id": "pumpkin-global", "aliases": ["pumpkin", "PGL"] }
+    { "id": "cortex", "aliases": ["cortex-team"] }
   ],
   "knownProjects": [
     { "id": "engram", "aliases": ["memory system"] },
