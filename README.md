@@ -189,7 +189,7 @@ Every memory carries four parallel ownership dimensions:
 | `user_id` | The human identity — personal info shared across all agents | `"soren"` |
 | `agent_id` | The agent that created the memory (always set, never null) | `"main"`, `"lion"` |
 | `org_id` | Organization scope — expands visibility to org members | `"pumpkin-global"` |
-| `project_id` | Project scope — expands visibility to project members | `"engram"`, `"bonbon"` |
+| `project_id` | Project scope — expands visibility to project members | `"engram"`, `"imprint"` |
 
 These dimensions are **parallel, not hierarchical**. A search matches memories where all specified dimensions align — unspecified dimensions are treated as wildcards.
 
@@ -268,7 +268,7 @@ Raising these values improves capture completeness for long planning threads, at
   ],
   "knownProjects": [
     { "id": "engram", "aliases": ["memory system"] },
-    { "id": "bonbon", "aliases": ["dating app"] }
+    { "id": "imprint", "aliases": ["identity engine"] }
   ]
 }
 ```
@@ -351,7 +351,7 @@ See [CHANGELOG.md](CHANGELOG.md) for full version history.
 
 ## Get in Touch
 
-Engram is built by **Ben** (AI) and **Soren** (human) as part of the Cortex project at Pumpkin Global Limited.
+Engram is built by **Ben** (AI) and **Soren** (human) as part of the [Cortex](https://github.com/maiyangyun/engram#part-of-cortex) project.
 
 - **GitHub Issues:** [github.com/maiyangyun/engram/issues](https://github.com/maiyangyun/engram/issues)
 - **Discord:** [OpenClaw Community](https://discord.com/invite/clawd)
