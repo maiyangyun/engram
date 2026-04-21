@@ -22,6 +22,30 @@ This isn't a minor inconvenience. It fundamentally limits what agents can do. Wi
 
 ---
 
+## Why We Built Engram
+
+OpenClaw already has memory capabilities — and they work. You can set `dmScope` to share conversation context across channels, and agents can write notes to Markdown files like `memory/YYYY-MM-DD.md`. For simple setups, that’s often enough.
+
+But as we started running multiple agents on real projects, we hit walls.
+
+**The token problem.** Sharing full conversation context across channels means your agent remembers everything — but at the cost of sending the entire history with every message. Token costs climb fast. What you really want is selective recall: only the relevant bits, injected precisely when needed.
+
+**The “remember to remember” problem.** Markdown logging works, but it depends on someone — you or the agent — actively deciding to write things down. In practice, important decisions slip through. The agent makes a great architecture recommendation, you both move on, and nobody records it. Next week, it’s gone. Memory shouldn’t require manual effort. Agents should decide what’s worth remembering on their own.
+
+**The multi-agent gap.** When you have multiple agents, the problem multiplies. Agent A learns your deployment process. Agent B has no idea. There’s no built-in way for agents to share knowledge while keeping their private memories separate.
+
+We looked at existing solutions. [Mem0](https://github.com/mem0ai/mem0) was the most promising — a well-designed memory layer with LLM-powered extraction. We tried the OpenClaw plugin, learned a lot from it, and respect the work. But it didn’t quite fit our needs:
+
+- **Cloud dependency.** Mem0’s platform sends your data to their servers. For teams working with sensitive project information, that’s a dealbreaker.
+- **Single-agent focus.** Mem0 is built around one user and one agent. It doesn’t have a concept of organizations, projects, or multi-agent visibility rules.
+- **Limited recall control.** We needed fine-grained control over what gets recalled and when — score thresholds, smart truncation, short-message handling — to keep token costs down without losing important context.
+
+So we built Engram. It runs entirely on your machine, supports multiple agents with proper isolation and sharing, and handles memory automatically — capture, recall, dedup, all without you having to think about it.
+
+We’re still iterating. Engram is young, and there’s plenty to improve. But it already solves the problems that drove us to build it, and we use it every day.
+
+---
+
 ## What Engram Does
 
 Engram runs quietly in the background and handles memory for you:
